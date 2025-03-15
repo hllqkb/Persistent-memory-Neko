@@ -1,102 +1,35 @@
-"""
-RAG (Retrieval-Augmented Generation) 对话系统实现
-====================================
+import logging
+from logging.handlers import RotatingFileHandler
 
-系统架构
---------
-本系统实现了一个基于 RAG (检索增强生成) 的对话系统，集成了以下核心组件：
+# 在 Memory 类之前添加日志配置
+def setup_logger():
+    """配置日志记录器"""
+    logger = logging.getLogger('neko')
+    logger.setLevel(logging.INFO)
+    
+    # 创建 logs 目录（如果不存在）
+    if not os.path.exists('logs'):
+        os.makedirs('logs')
+    
+    # 设置日志文件，使用 RotatingFileHandler 进行日志轮转
+    handler = RotatingFileHandler(
+        'logs/neko.log',
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=5,
+        encoding='utf-8'
+    )
+    
+    formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    
+    return logger
 
-1. 向量数据库 (FAISS)
-   - 用于存储对话的向量表示
-   - 支持高效的相似度检索
-   - 使用 L2 距离进行相似度计算
-   - 自动处理数据格式兼容性
-
-2. 图数据库 (Neo4j)
-   - 存储结构化的对话历史
-   - 支持时间序列查询
-   - 使用标签和索引优化查询性能
-
-3. 大语言模型 (Qwen)
-   - 通过 SiliconFlow API 访问
-   - 支持流式输出
-   - 集成上下文增强的对话能力
-
-4. 向量嵌入 (BGE-Large)
-   - 使用 BAAI/bge-large-zh-v1.5 模型
-   - 1024 维向量表示
-   - 通过 SiliconFlow API 获取嵌入
-
-工作流程
---------
-1. 用户输入处理
-   - 接收用户输入
-   - 生成输入文本的向量表示
-
-2. 上下文检索
-   - 基于向量相似度搜索相关历史对话
-   - 获取最近的对话记录
-   - 组合生成增强上下文
-
-3. 响应生成
-   - 将上下文注入到系统提示中
-   - 调用语言模型生成回答
-   - 流式输出响应内容
-
-4. 记忆存储
-   - 将对话保存到 Neo4j
-   - 生成对话的向量表示
-   - 更新 FAISS 索引
-
-关键类说明
---------
-1. Memory
-   - 对话记忆的数据结构
-   - 包含用户消息、AI响应、时间戳和相似度
-   - 支持格式化输出
-
-2. Neo4jDatabase
-   - 处理与 Neo4j 的交互
-   - 管理数据库结构和索引
-   - 提供记忆的 CRUD 操作
-
-3. FAISSMemoryStore
-   - 管理向量索引和检索
-   - 处理数据持久化
-   - 提供相似度搜索功能
-
-性能优化
---------
-1. 向量检索
-   - 使用 FAISS 的 L2 距离索引
-   - 支持高效的 K 近邻搜索
-
-2. 数据库优化
-   - 时间戳索引加速查询
-   - 批量操作减少数据库负载
-
-3. 内存管理
-   - 流式处理大型响应
-   - 优化数据结构减少内存占用
-
-使用说明
---------
-1. 环境要求
-   - Python 3.8+
-   - Neo4j 数据库
-   - FAISS CPU 版本
-   - OpenAI API 密钥
-
-2. 配置说明
-   - Neo4j 连接参数
-   - API 密钥设置
-   - 向量维度配置
-
-3. 运行方式
-   - 直接对话模式
-   - 支持退出命令
-   - 自动保存对话历史
-"""
+# 初始化日志记录器
+logger = setup_logger()
 
 from openai import OpenAI
 from neo4j import GraphDatabase
@@ -162,10 +95,24 @@ class Neo4jDatabase:
     def close(self):
         self.driver.close()
 
-    def create_memory_with_relations(self, user_message: str, ai_response: str, similar_memories: List[Memory], similarity_threshold: float = 0.8):
-        """创建新的记忆节点并建立相似度关系"""
+    def create_memory_with_relations(self, user_message: str, ai_response: str, similar_memories: List[Memory], similarity_threshold: float = 0.7):#Neo4j关系连接度0.7
+        """创建新的记忆节点并建立相似度关系
+        
+        Args:
+            user_message: 用户消息
+            ai_response: AI回答
+            similar_memories: 相似记忆列表
+            similarity_threshold: 相似度阈值，低于此值的记忆不建立关系
+        """
+        print("Neo4j关系连接度",similarity_threshold)
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
         with self.driver.session() as session:
+            # 首先检查是否存在高度相似的记忆
+            for memory in similar_memories:
+                if memory.similarity > 0.95:  # 相似度超过95%视为重复
+                    print(f"发现高度相似的记忆 (相似度: {memory.similarity:.4f})，跳过创建")
+                    return memory.timestamp  # 直接返回已存在的记忆时间戳
+            
             # 创建新记忆节点
             session.run("""
                 CREATE (m:Memory {
@@ -179,9 +126,24 @@ class Neo4jDatabase:
             
             # 使用集合去重，只保留相似度最高的关系
             processed_timestamps = set()
-            for memory in sorted(similar_memories, key=lambda x: x.similarity, reverse=True):
-                if memory.timestamp not in processed_timestamps and memory.similarity >= similarity_threshold:
-                    # 使用MATCH和WHERE子句确保节点存在，然后创建关系
+            
+            # 按相似度降序排序
+            sorted_memories = sorted(similar_memories, key=lambda x: x.similarity, reverse=True)
+            
+            for memory in sorted_memories:
+                if memory.timestamp not in processed_timestamps and similarity_threshold <= memory.similarity <= 0.95:
+                    # 检查是否已经存在相似的关系路径
+                    existing_relations = session.run("""
+                        MATCH path = (m1:Memory)-[r:SIMILAR_TO*]-(m2:Memory)
+                        WHERE m1.timestamp = $timestamp1 AND m2.timestamp = $timestamp2
+                        RETURN count(path) as path_count
+                    """, timestamp1=timestamp, timestamp2=memory.timestamp).single()
+                    
+                    if existing_relations and existing_relations["path_count"] > 0:
+                        print(f"已存在关系路径，跳过创建 (相似度: {memory.similarity:.4f})")
+                        continue
+                    
+                    # 创建新的关系
                     session.run("""
                         MATCH (m1:Memory {timestamp: $new_timestamp})
                         MATCH (m2:Memory {timestamp: $old_timestamp})
@@ -194,20 +156,35 @@ class Neo4jDatabase:
                         similarity=memory.similarity)
                     processed_timestamps.add(memory.timestamp)
                     print(f"创建关系: 相似度 {memory.similarity:.4f}")
+        
         return timestamp
 
     def get_related_memories(self, timestamp: str, max_depth: int = 2, min_similarity: float = 0.8) -> List[Memory]:
-        """通过图关系获取相关记忆"""
+        """通过图关系获取相关记忆
+        
+        Args:
+            timestamp: 起始记忆的时间戳
+            max_depth: 最大搜索深度
+            min_similarity: 最小相似度阈值 (0.0-1.0)
+            
+        Returns:
+            List[Memory]: 相关记忆列表，按相似度降序排序，去重
+        """
         with self.driver.session() as session:
-            # 优化查询语句，使用WHERE过滤掉自身节点
+            # 优化查询语句:
+            # 1. 使用 DISTINCT 去重
+            # 2. 添加相似度过滤
+            # 3. 优化路径搜索
             query = f"""
                 MATCH (start:Memory {{timestamp: $timestamp}})
                 MATCH path = (start)-[r:SIMILAR_TO*1..{max_depth}]-(related:Memory)
                 WHERE start <> related AND
                       ALL(rel IN relationships(path) WHERE rel.similarity >= $min_similarity)
-                WITH related, reduce(s = 1.0, rel IN relationships(path) | s * rel.similarity) as total_similarity
-                ORDER BY total_similarity DESC
-                RETURN DISTINCT related.user_message as user_message,
+                WITH DISTINCT related,
+                     reduce(s = 1.0, rel IN relationships(path) | s * rel.similarity) as total_similarity,
+                     length(path) as path_length
+                ORDER BY total_similarity DESC, path_length ASC
+                RETURN related.user_message as user_message,
                        related.ai_response as ai_response,
                        related.timestamp as timestamp,
                        total_similarity
@@ -218,12 +195,22 @@ class Neo4jDatabase:
                 min_similarity=min_similarity
             )
             
-            return [Memory(
-                user_message=record["user_message"],
-                ai_response=record["ai_response"],
-                timestamp=record["timestamp"],
-                similarity=record["total_similarity"]
-            ) for record in result]
+            # 使用集合去重
+            seen_timestamps = set()
+            memories = []
+            
+            for record in result:
+                timestamp = record["timestamp"]
+                if timestamp not in seen_timestamps:
+                    memories.append(Memory(
+                        user_message=record["user_message"],
+                        ai_response=record["ai_response"],
+                        timestamp=timestamp,
+                        similarity=record["total_similarity"]
+                    ))
+                    seen_timestamps.add(timestamp)
+            
+            return memories
 
     def get_recent_memories(self, limit: int = 5) -> List[Memory]:
         """获取最近的记忆"""
@@ -360,7 +347,6 @@ def get_embedding(text: str) -> np.ndarray:
     )
     if response.status_code == 200:
         embedding = np.array(response.json()["data"][0]["embedding"], dtype=np.float32)
-        print(f"获取embedding用时: {time.time() - start_time:.2f}秒")
         return embedding
     else:
         raise Exception(f"获取嵌入向量失败: {response.text}")
@@ -385,7 +371,6 @@ def get_context(query: str, k=3) -> str:
         print("-" * 50)
         for i, memory in enumerate(similar_memories, 1):
             print(f"记忆 {i}:")
-            print(f"时间: {datetime.datetime.strptime(memory.timestamp, '%Y-%m-%d %H:%M:%S.%f').strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"相似度: {memory.similarity:.4f}")
             print(f"用户问题: {memory.user_message}")
             print(f"AI回答: {memory.ai_response[:100]}..." if len(memory.ai_response) > 100 else memory.ai_response)
@@ -399,7 +384,6 @@ def get_context(query: str, k=3) -> str:
                 print("-" * 50)
                 for j, rel_memory in enumerate(related_memories, 1):
                     print(f"关联记忆 {j}:")
-                    print(f"时间: {datetime.datetime.strptime(rel_memory.timestamp, '%Y-%m-%d %H:%M:%S.%f').strftime('%Y-%m-%d %H:%M:%S')}")
                     print(f"关联强度: {rel_memory.similarity:.4f}")
                     print(f"用户问题: {rel_memory.user_message}")
                     print(f"AI回答: {rel_memory.ai_response[:100]}..." if len(rel_memory.ai_response) > 100 else rel_memory.ai_response)
@@ -422,18 +406,29 @@ def get_context(query: str, k=3) -> str:
                 for rel_memory in related_memories:
                     context += f"[关联强度: {rel_memory.similarity:.4f}] {str(rel_memory)}\n"
             context += "-" * 50 + "\n"
-    
-    print(f"\n生成上下文完成，总用时: {time.time() - start_time:.2f}秒")
     return context
 
 def save_conversation(user_message: str, ai_response: str):
+    """保存对话并记录日志"""
     print("\n保存对话...")
     start_time = time.time()
     
     # 获取相似记忆
     combined_text = f"用户: {user_message}\n助手: {ai_response}"
-    embedding = get_embedding(combined_text)  # 现在返回的是numpy数组
+    embedding = get_embedding(combined_text)
     similar_memories = memory_store.search(embedding, k=5)
+    
+    # 检查是否存在高度相似的记忆
+    is_duplicate = False
+    if similar_memories:
+        highest_similarity = similar_memories[0].similarity
+        if highest_similarity > 0.95:  # 相似度阈值
+            is_duplicate = True
+            logger.info(f"检测到重复问题，相似度: {highest_similarity:.4f}")
+            logger.info(f"原问题: {similar_memories[0].user_message}")
+            logger.info(f"新问题: {user_message}")
+            print(f"检测到重复问题，跳过保存（相似度: {highest_similarity:.4f}）")
+            return
     
     # 保存到Neo4j并建立关系
     print("\n1. 保存到Neo4j并建立记忆关系...")
@@ -443,31 +438,72 @@ def save_conversation(user_message: str, ai_response: str):
     print("\n2. 保存到FAISS向量存储...")
     memory_store.add_text(combined_text, embedding, timestamp)
     
-    print(f"\n保存对话完成，总用时: {time.time() - start_time:.2f}秒")
+    # 记录日志
+    logger.info("=== 新对话已保存 ===")
+    logger.info(f"时间戳: {timestamp}")
+    logger.info(f"用户问题: {user_message}")
+    logger.info(f"AI回答: {ai_response}")
+    if similar_memories:
+        logger.info("相似记忆:")
+        for i, memory in enumerate(similar_memories, 1):
+            logger.info(f"  {i}. 相似度: {memory.similarity:.4f}")
+            logger.info(f"     问题: {memory.user_message}")
+
+def calculate_tokens_and_cost(input_text: str, output_text: str) -> tuple:
+    """计算输入输出的token数和总费用
+    
+    Returns:
+        tuple: (input_tokens: int, output_tokens: int, total_cost: float)
+    """
+    # 简单估算：中文每个字约1.5个token，英文每个单词约1个token
+    # 这是粗略估计，实际token数可能有所不同
+    input_tokens = len(input_text) * 1.5
+    output_tokens = len(output_text) * 1.5
+    
+    # 计算费用 (单位：元)
+    # 输入：￥4/M tokens = ￥0.000004/token
+    # 输出：￥16/M tokens = ￥0.000016/token
+    input_cost = input_tokens * 0.000004
+    output_cost = output_tokens * 0.000016
+    total_cost = input_cost + output_cost
+    
+    return int(input_tokens), int(output_tokens), total_cost
 
 try:
     print("\n=== AI助手启动 ===")
+    logger.info("=== AI助手启动 ===")
+    total_cost = 0.0
     
     while True:
         message = input("\n请输入你想说的话（输入'exit'退出）：\n")
         if message.lower() == "exit":
             break
             
+        # 记录用户输入
+        logger.info("=== 新对话开始 ===")
+        logger.info(f"用户输入: {message}")
+        
         # 获取相关上下文
         context = get_context(message)
         
         # 构建带有上下文的提示
         print("\n构建带有上下文的提示...")
+        system_message = "你是一个有记忆能力的AI助手。" + context
         messages = [
-            {"role": "system", "content": "你是一个有记忆能力的AI助手。" + context},
+            {"role": "system", "content": system_message},
             {"role": "user", "content": message},
         ]
+        
+        # 记录完整prompt
+        logger.info("完整Prompt:")
+        logger.info(f"System: {system_message}")
+        logger.info(f"User: {message}")
 
         # 获取AI响应
         print("\n生成回答中...")
         start_time = time.time()
         response = client.chat.completions.create(
-            model="ft:LoRA/Qwen/Qwen2.5-32B-Instruct:lqyic99t1y:s:jkbyjnqzspvrgwcbuktk",# 32b微调的角色扮演模型，需要结合prompt使用
+            model="Pro/deepseek-ai/DeepSeek-V3",
             messages=messages,
             stream=True,
             max_tokens=4096
@@ -483,13 +519,27 @@ try:
             print(content, end='', flush=True)
         print("\n" + "-" * 50)
         
-        print(f"\n生成回答用时: {time.time() - start_time:.2f}秒")
-            
+        # 计算token数和费用
+        input_tokens, output_tokens, cost = calculate_tokens_and_cost(
+            system_message + message, 
+            full_response
+        )
+        total_cost += cost
+        
+        # 记录token统计和费用信息
+        logger.info(f"输入tokens: {input_tokens:,}")
+        logger.info(f"输出tokens: {output_tokens:,}")
+        logger.info(f"本次费用: ￥{cost:.4f}")
+        logger.info(f"累计总费用: ￥{total_cost:.4f}")
+        
         # 保存对话
         save_conversation(message, full_response)
 
 finally:
-    print("\n=== 清理资源 ===")
+    logger.info(f"=== 会话结束 ===")
+    logger.info(f"本次会话总费用: ￥{total_cost:.4f}")
     neo4j_db.close()
+    print("\n=== 清理资源 ===")
+    print(f"本次会话总费用: ￥{total_cost:.4f}")
     print("Neo4j连接已关闭")
     print("程序结束")
