@@ -91,11 +91,24 @@ def load_config():
             "model": {
                 "name": "Pro/deepseek-ai/DeepSeek-V3",
                 "temperature": 0.7,
-                "max_tokens": 4096
+                "max_tokens": 4096,
+                "top_p": 0.9,
+                "frequency_penalty": 0,
+                "presence_penalty": 0
             },
             "embedding": {
                 "model": "BAAI/bge-large-zh-v1.5",
                 "timeout": 30
+            },
+            "rerank": {
+                "enabled": True,
+                "model": "BAAI/bge-reranker-v2-m3",
+                "top_n": 5
+            },
+            "retrieval": {
+                "graph_related_depth": 2,
+                "min_similarity": 0.7,
+                "filter_similarity_threshold": 0.8
             },
             "storage": {
                 "neo4j": {
@@ -812,6 +825,70 @@ except FileNotFoundError:
     logger.error("base.md文件不存在")
     basemd = "base.md文件不存在，无法获取内容。"
 
+def rerank_documents(query: str, documents: List[str], top_n: int = None) -> List[dict]:
+    """使用SiliconFlow的重排序API对文档进行重排序
+    
+    Args:
+        query: 查询文本
+        documents: 候选文档列表
+        top_n: 返回的最大文档数量，默认返回所有文档
+        
+    Returns:
+        List[dict]: 重排序后的文档列表，包含索引和相关性分数
+    """
+    if not documents:
+        return []
+    
+    # 准备API请求
+    headers = {
+        "Authorization": f"Bearer {client.api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    # 从配置中获取rerank模型，如果没有则使用默认值
+    rerank_model = config.get("rerank", {}).get("model", "BAAI/bge-reranker-v2-m3")
+    
+    # 设置top_n，如果未指定则使用文档数量
+    if top_n is None:
+        top_n = len(documents)
+    
+    # API请求数据
+    data = {
+        "model": rerank_model,
+        "query": query,
+        "documents": documents,
+        "top_n": top_n,
+        "return_documents": False,  # 不需要返回文档内容
+        "max_chunks_per_doc": 1024,
+        "overlap_tokens": 80
+    }
+    
+    try:
+        # 发送请求
+        response = requests.post(
+            f"{config['api']['base_url']}/rerank",
+            headers=headers,
+            json=data,
+            timeout=config["api"]["timeout"]
+        )
+        
+        # 检查响应状态
+        if response.status_code != 200:
+            error_msg = f"重排序API请求失败 (状态码: {response.status_code}): {response.text}"
+            logger.error(error_msg)
+            return []
+        
+        # 解析响应
+        result = response.json()
+        
+        # 返回重排序结果
+        return result.get("results", [])
+        
+    except Exception as e:
+        logger.error(f"重排序过程中发生错误: {str(e)}")
+        print(f"{Fore.RED}重排序过程中发生错误: {str(e)}{Style.RESET_ALL}")
+        return []
+
 def get_context(query: str, k=3) -> str:
     """获取相关上下文，返回简洁的prompt给AI，同时记录详细日志"""
     logger.info(f"\n============ 开始构建上下文 ============")
@@ -856,8 +933,8 @@ def get_context(query: str, k=3) -> str:
         start_timestamp = vector_memories[0].timestamp
         graph_memories = neo4j_db.get_related_memories(
             start_timestamp, 
-            max_depth=config["retrieval"]["graph_related_depth"],
-            min_similarity=config["retrieval"]["min_similarity"]
+            max_depth=config.get("retrieval", {}).get("graph_related_depth", 2),
+            min_similarity=config.get("retrieval", {}).get("min_similarity", 0.7)
         )
     
     # 4. 合并所有记忆并去重
@@ -874,8 +951,37 @@ def get_context(query: str, k=3) -> str:
     merged_memories = list(unique_memories.values())
     merged_memories.sort(key=lambda x: x.similarity, reverse=True)
     
-    # 5. 进一步筛选，移除内容高度相似的记忆
-    print(f"\n{Fore.CYAN}6. 筛选内容高度相似的记忆...{Style.RESET_ALL}")
+    # 5. 使用重排序API进一步优化结果
+    if config.get("rerank", {}).get("enabled", True) and len(merged_memories) > 1:
+        print(f"\n{Fore.CYAN}6. 使用重排序API优化结果...{Style.RESET_ALL}")
+        
+        # 准备重排序的文档
+        documents = []
+        for memory in merged_memories:
+            # 构建完整文本
+            doc_text = f"用户: {memory.user_message}\n助手: {memory.ai_response}"
+            documents.append(doc_text)
+        
+        # 调用重排序API
+        rerank_results = rerank_documents(query, documents, top_n=k*2)
+        
+        if rerank_results:
+            # 根据重排序结果重新排序记忆
+            reranked_memories = []
+            for result in rerank_results:
+                idx = result.get("index")
+                if 0 <= idx < len(merged_memories):
+                    # 更新相似度分数
+                    merged_memories[idx].similarity = result.get("relevance_score", 0.0)
+                    reranked_memories.append(merged_memories[idx])
+            
+            # 使用重排序后的结果
+            if reranked_memories:
+                merged_memories = reranked_memories
+                print(f"{Fore.GREEN}重排序成功，优化了 {len(reranked_memories)} 条记忆的排序{Style.RESET_ALL}")
+    
+    # 6. 进一步筛选，移除内容高度相似的记忆
+    print(f"\n{Fore.CYAN}7. 筛选内容高度相似的记忆...{Style.RESET_ALL}")
     filtered_memories = []
     seen_contents = set()
     
@@ -887,7 +993,7 @@ def get_context(query: str, k=3) -> str:
         is_duplicate = False
         for existing_key in seen_contents:
             # 使用简单的字符串相似度检查
-            if similarity_score(content_key, existing_key) > config["retrieval"]["filter_similarity_threshold"]:
+            if similarity_score(content_key, existing_key) > config.get("retrieval", {}).get("filter_similarity_threshold", 0.8):
                 is_duplicate = True
                 break
         
@@ -2107,4 +2213,121 @@ finally:
     print(f"{Fore.CYAN}Neo4j连接已关闭{Style.RESET_ALL}")
     print(f"{Fore.MAGENTA}感谢使用持久记忆AI助手，再见！{Style.RESET_ALL}")
     print(f"{Fore.YELLOW}程序结束{Style.RESET_ALL}")
+
+def search_memories(keyword=None):
+    """搜索记忆
+    
+    Args:
+        keyword: 可选的搜索关键词
+    """
+    try:
+        print(f"\n{Fore.CYAN}{'=' * 50}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}{'=' * 15}{Fore.WHITE} 记忆搜索 {Fore.CYAN}{'=' * 15}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}{'=' * 50}{Style.RESET_ALL}")
+        
+        if keyword is None:
+            keyword = input(f"{Fore.YELLOW}请输入搜索关键词: {Style.RESET_ALL}")
+        
+        if not keyword:
+            print(f"{Fore.RED}搜索关键词不能为空{Style.RESET_ALL}")
+            return False
+            
+        print(f"{Fore.CYAN}搜索关键词: {Fore.YELLOW}{keyword}{Style.RESET_ALL}")
+        
+        # 1. 从Neo4j获取包含关键词的记忆
+        with neo4j_db.driver.session() as session:
+            result = session.run("""
+                MATCH (m:Memory)
+                WHERE m.user_message_preview CONTAINS $keyword OR 
+                      m.ai_response_preview CONTAINS $keyword OR
+                      m.topic CONTAINS $keyword
+                RETURN m.timestamp as timestamp, m.topic as topic, 
+                       m.user_message_preview as user_msg, m.ai_response_preview as ai_msg
+                ORDER BY m.timestamp DESC
+                LIMIT 20
+            """, keyword=keyword)
+            
+            memories = [(
+                record["timestamp"], 
+                record["topic"], 
+                record["user_msg"], 
+                record["ai_msg"]
+            ) for record in result]
+        
+        if not memories:
+            print(f"{Fore.YELLOW}未找到包含关键词 '{keyword}' 的记忆{Style.RESET_ALL}")
+            
+            # 尝试使用重排序API进行语义搜索
+            print(f"{Fore.CYAN}尝试使用语义搜索...{Style.RESET_ALL}")
+            
+            # 获取所有记忆的预览
+            with neo4j_db.driver.session() as session:
+                result = session.run("""
+                    MATCH (m:Memory)
+                    RETURN m.timestamp as timestamp, m.topic as topic, 
+                           m.user_message_preview as user_msg, m.ai_response_preview as ai_msg
+                    LIMIT 100
+                """)
+                
+                all_memories = [(
+                    record["timestamp"], 
+                    record["topic"], 
+                    record["user_msg"], 
+                    record["ai_msg"]
+                ) for record in result]
+            
+            if not all_memories:
+                print(f"{Fore.YELLOW}数据库中没有记忆{Style.RESET_ALL}")
+                return False
+            
+            # 准备重排序的文档
+            documents = []
+            for ts, topic, user_msg, ai_msg in all_memories:
+                doc_text = f"{topic}: {user_msg} {ai_msg}"
+                documents.append(doc_text)
+            
+            # 调用重排序API
+            rerank_results = rerank_documents(keyword, documents, top_n=10)
+            
+            if not rerank_results:
+                print(f"{Fore.YELLOW}语义搜索未找到相关结果{Style.RESET_ALL}")
+                return False
+            
+            # 根据重排序结果获取记忆
+            semantic_memories = []
+            for result in rerank_results:
+                idx = result.get("index")
+                if 0 <= idx < len(all_memories):
+                    memory = all_memories[idx]
+                    semantic_memories.append((*memory, result.get("relevance_score", 0.0)))
+            
+            if semantic_memories:
+                print(f"{Fore.GREEN}语义搜索找到 {len(semantic_memories)} 条相关记忆{Style.RESET_ALL}")
+                
+                # 显示语义搜索结果
+                for i, (ts, topic, user_msg, ai_msg, score) in enumerate(semantic_memories, 1):
+                    print(f"\n{Fore.GREEN}[{i}] {Fore.YELLOW}[相关度: {score:.4f}] {Fore.CYAN}{topic} ({ts}){Style.RESET_ALL}")
+                    print(f"{Fore.WHITE}用户: {user_msg}{Style.RESET_ALL}")
+                    print(f"{Fore.WHITE}助手: {ai_msg}{Style.RESET_ALL}")
+                    print(f"{Fore.YELLOW}{'-' * 50}{Style.RESET_ALL}")
+                
+                return True
+            
+            return False
+        
+        # 显示搜索结果
+        print(f"{Fore.GREEN}找到 {len(memories)} 条包含关键词 '{keyword}' 的记忆{Style.RESET_ALL}")
+        
+        for i, (ts, topic, user_msg, ai_msg) in enumerate(memories, 1):
+            print(f"\n{Fore.GREEN}[{i}] {Fore.CYAN}{topic} ({ts}){Style.RESET_ALL}")
+            print(f"{Fore.WHITE}用户: {user_msg}{Style.RESET_ALL}")
+            print(f"{Fore.WHITE}助手: {ai_msg}{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}{'-' * 50}{Style.RESET_ALL}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"{Fore.RED}搜索记忆时发生错误: {str(e)}{Style.RESET_ALL}")
+        logger.error(f"搜索记忆时发生错误: {str(e)}")
+        return False
 
