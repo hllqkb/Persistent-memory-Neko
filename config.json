@@ -5,5 +5,48 @@
   "maxTokens": 4096,
   "similarityThreshold": 0.7,
   "memoryDepth": 2,
-  "maxConversationTurns": 10
+  "maxConversationTurns": 10,
+  "storage": {
+    "neo4j": {
+      "uri": "bolt://localhost:7687",
+      "user": "neo4j",
+      "password": "12345678",
+      "store_full_content": false,
+      "store_metadata": true,
+      "similarity_threshold": 0.7
+    },
+    "faiss": {
+      "store_full_content": true,
+      "dimension": 1024,
+      "index_type": "flat"
+    }
+  },
+  "retrieval": {
+    "semantic_search_count": 3,
+    "topic_related_count": 3,
+    "graph_related_depth": 1,
+    "min_similarity": 0.7,
+    "filter_similarity_threshold": 0.9
+  },
+  "performance": {
+    "use_cache": true,
+    "cache_size_mb": 100,
+    "use_async": true,
+    "batch_size": 5,
+    "max_workers": 4,
+    "memory_threshold_mb": 1000,
+    "max_cache_files": 1000,
+    "check_interval": 10,
+    "common_queries": [
+      "你好",
+      "你是谁",
+      "你能做什么",
+      "帮我写代码",
+      "讲个故事"
+    ]
+  },
+  "short_term_memory": {
+    "max_rounds": 3,
+    "include_in_context": true
+  }
 }
