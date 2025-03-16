@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, session, send_from_directory
+from flask import Flask, render_template, request, jsonify, session, send_from_directory, Response
 import os
 import json
 import datetime
@@ -220,7 +220,7 @@ class SQLiteDatabase:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # 检查表结构
+        # 检查conversations表结构
         cursor.execute("PRAGMA table_info(conversations)")
         columns = cursor.fetchall()
         column_names = [col[1] for col in columns]
@@ -234,7 +234,8 @@ class SQLiteDatabase:
                 ai_message TEXT,
                 timestamp REAL,
                 tokens INTEGER DEFAULT 0,
-                cost REAL DEFAULT 0
+                cost REAL DEFAULT 0,
+                group_id TEXT DEFAULT NULL
             )
             ''')
             logger.info("创建新的conversations表")
@@ -246,37 +247,78 @@ class SQLiteDatabase:
         else:
             self.use_old_schema = False
             logger.info("使用标准数据库结构")
+            
+            # 检查是否需要添加group_id列
+            if 'group_id' not in column_names:
+                try:
+                    cursor.execute("ALTER TABLE conversations ADD COLUMN group_id TEXT DEFAULT NULL")
+                    logger.info("添加group_id列到conversations表")
+                except Exception as e:
+                    logger.error(f"添加group_id列失败: {e}")
+        
+        # 检查conversation_groups表是否存在
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='conversation_groups'")
+        if not cursor.fetchone():
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS conversation_groups (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                created_at REAL,
+                updated_at REAL,
+                message_count INTEGER DEFAULT 0
+            )
+            ''')
+            logger.info("创建新的conversation_groups表")
         
         conn.commit()
         conn.close()
         
         logger.info(f"已初始化SQLite数据库: {self.db_path}")
     
-    def save_conversation(self, user_message, ai_message, tokens=0, cost=0):
-        # 保存对话
+    def save_conversation(self, user_message, ai_response, group_id=None, tokens=0, cost=0):
+        """保存对话到指定的对话组"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
         timestamp = time.time()
         
+        # 如果没有提供group_id，创建一个新的对话组
+        if not group_id:
+            # 检查是否有最近的对话组
+            cursor.execute(
+                "SELECT group_id FROM conversations WHERE group_id IS NOT NULL ORDER BY timestamp DESC LIMIT 1"
+            )
+            row = cursor.fetchone()
+            if row:
+                group_id = row[0]
+            else:
+                # 创建新的对话组
+                group_id = self.create_conversation_group()
+        
         # 根据数据库结构选择正确的列名
         if hasattr(self, 'use_old_schema') and self.use_old_schema:
             cursor.execute(
-                "INSERT INTO conversations (user_message, ai_response, timestamp, tokens, cost) VALUES (?, ?, ?, ?, ?)",
-                (user_message, ai_message, timestamp, tokens, cost)
+                "INSERT INTO conversations (user_message, ai_response, timestamp, tokens, cost, group_id) VALUES (?, ?, ?, ?, ?, ?)",
+                (user_message, ai_response, timestamp, tokens, cost, group_id)
             )
         else:
             cursor.execute(
-                "INSERT INTO conversations (user_message, ai_message, timestamp, tokens, cost) VALUES (?, ?, ?, ?, ?)",
-                (user_message, ai_message, timestamp, tokens, cost)
+                "INSERT INTO conversations (user_message, ai_message, timestamp, tokens, cost, group_id) VALUES (?, ?, ?, ?, ?, ?)",
+                (user_message, ai_response, timestamp, tokens, cost, group_id)
             )
+        
+        # 更新对话组的消息数量和最后更新时间
+        cursor.execute(
+            "UPDATE conversation_groups SET message_count = message_count + 1, updated_at = ? WHERE id = ?",
+            (timestamp, group_id)
+        )
         
         conn.commit()
         conn.close()
         
-        logger.info(f"已保存对话，ID: {cursor.lastrowid}")
+        logger.info(f"已保存对话，ID: {cursor.lastrowid}, 对话组: {group_id}")
         
-        return timestamp
+        return timestamp, group_id
     
     def get_stats(self):
         # 获取统计信息
@@ -309,6 +351,132 @@ class SQLiteDatabase:
         conn.close()
         
         logger.info("已清空数据库")
+
+    def create_conversation_group(self, title=None):
+        """创建一个新的对话组"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        group_id = str(time.time())
+        created_at = time.time()
+        
+        # 如果没有提供标题，使用日期作为默认标题
+        if not title:
+            title = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        cursor.execute(
+            "INSERT INTO conversation_groups (id, title, created_at, updated_at, message_count) VALUES (?, ?, ?, ?, ?)",
+            (group_id, title, created_at, created_at, 0)
+        )
+        
+        conn.commit()
+        conn.close()
+        
+        logger.info(f"创建新的对话组: {group_id}, 标题: {title}")
+        
+        return group_id
+    
+    def get_conversation_groups(self, limit=20, offset=0):
+        """获取对话组列表"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            "SELECT id, title, created_at, updated_at, message_count FROM conversation_groups ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+            (limit, offset)
+        )
+        
+        groups = []
+        for row in cursor.fetchall():
+            group_id, title, created_at, updated_at, message_count = row
+            groups.append({
+                'id': group_id,
+                'title': title,
+                'created_at': created_at,
+                'updated_at': updated_at,
+                'message_count': message_count,
+                'formatted_time': datetime.datetime.fromtimestamp(created_at).strftime('%Y-%m-%d %H:%M:%S')
+            })
+        
+        # 获取总数
+        cursor.execute("SELECT COUNT(*) FROM conversation_groups")
+        total_count = cursor.fetchone()[0]
+        
+        conn.close()
+        
+        return groups, total_count
+    
+    def get_conversation_group(self, group_id):
+        """获取单个对话组信息"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            "SELECT id, title, created_at, updated_at, message_count FROM conversation_groups WHERE id = ?",
+            (group_id,)
+        )
+        
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return None
+        
+        group_id, title, created_at, updated_at, message_count = row
+        group = {
+            'id': group_id,
+            'title': title,
+            'created_at': created_at,
+            'updated_at': updated_at,
+            'message_count': message_count,
+            'formatted_time': datetime.datetime.fromtimestamp(created_at).strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        conn.close()
+        
+        return group
+    
+    def update_conversation_group(self, group_id, title=None):
+        """更新对话组信息"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        updated_at = time.time()
+        
+        if title:
+            cursor.execute(
+                "UPDATE conversation_groups SET title = ?, updated_at = ? WHERE id = ?",
+                (title, updated_at, group_id)
+            )
+        else:
+            cursor.execute(
+                "UPDATE conversation_groups SET updated_at = ? WHERE id = ?",
+                (updated_at, group_id)
+            )
+        
+        conn.commit()
+        conn.close()
+        
+        logger.info(f"更新对话组: {group_id}")
+        
+        return True
+    
+    def delete_conversation_group(self, group_id):
+        """删除对话组及其所有对话"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # 删除对话组中的所有对话
+        cursor.execute("DELETE FROM conversations WHERE group_id = ?", (group_id,))
+        
+        # 删除对话组
+        cursor.execute("DELETE FROM conversation_groups WHERE id = ?", (group_id,))
+        
+        conn.commit()
+        conn.close()
+        
+        logger.info(f"删除对话组: {group_id}")
+        
+        return True
 
 # 初始化SQLite数据库
 db = SQLiteDatabase()
@@ -379,7 +547,7 @@ def get_context(message: str) -> str:
     return context
 
 # 保存对话
-def save_conversation(user_message: str, ai_response: str) -> str:
+def save_conversation(user_message: str, ai_response: str, group_id=None, tokens=0, cost=0) -> Tuple[str, str]:
     """保存对话并建立关系"""
     # 获取相似记忆
     combined_text = f"用户: {user_message}\n助手: {ai_response}"
@@ -391,15 +559,15 @@ def save_conversation(user_message: str, ai_response: str) -> str:
         logger.info(f"检测到重复问题，相似度: {similar_memories[0].similarity:.4f}")
         logger.info(f"原问题: {similar_memories[0].user_message}")
         logger.info(f"新问题: {user_message}")
-        return similar_memories[0].timestamp
+        return similar_memories[0].timestamp, group_id
     
     # 保存到SQLite
-    timestamp = db.save_conversation(user_message, ai_response)
+    timestamp, saved_group_id = db.save_conversation(user_message, ai_response, group_id, tokens, cost)
     
     # 保存到FAISS
     memory_store.add_text(combined_text, embedding, timestamp)
     
-    return timestamp
+    return timestamp, saved_group_id
 
 # 主页路由
 @app.route('/')
@@ -418,63 +586,173 @@ def chat():
     
     data = request.json
     message = data.get('message', '')
+    conversation_timestamp = data.get('conversation_timestamp')
+    group_id = data.get('group_id')
     
     if not message.strip():
-        return jsonify({'error': 'Message cannot be empty'}), 400
+        return jsonify({'error': '消息不能为空'}), 400
     
-    try:
-        # 获取相关上下文
-        context = get_context(message)
-        
-        # 构建带有上下文的提示
-        system_message = "你是一个有记忆能力的AI助手。" + context
-        messages = [
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": message},
-        ]
-        
-        # 记录完整prompt
-        logger.info("完整Prompt:")
-        logger.info(f"System: {system_message}")
-        logger.info(f"User: {message}")
+    def generate():
+        global total_cost
+        # 声明group_id为非局部变量，这样可以在内部函数中修改外部函数的变量
+        nonlocal group_id
+        try:
+            # 获取相关上下文
+            context = ""
+            
+            # 如果提供了对话组ID，获取该对话组的上下文
+            if group_id:
+                # 获取配置中的最大对话轮数
+                max_turns = config.get("maxConversationTurns", 10)
+                
+                # 连接数据库
+                conn = sqlite3.connect('neko.db')
+                cursor = conn.cursor()
+                
+                # 检查表结构
+                cursor.execute("PRAGMA table_info(conversations)")
+                columns = cursor.fetchall()
+                column_names = [col[1] for col in columns]
+                
+                # 确定使用哪个字段名
+                ai_field = 'ai_response' if 'ai_response' in column_names else 'ai_message'
+                
+                # 获取指定对话组的对话（最多max_turns轮）
+                query = f"""
+                    SELECT user_message, {ai_field}
+                    FROM conversations 
+                    WHERE group_id = ? 
+                    ORDER BY timestamp DESC 
+                    LIMIT ?
+                """
+                cursor.execute(query, (group_id, max_turns))
+                previous_conversations = cursor.fetchall()
+                
+                # 构建上下文（按时间正序）
+                if previous_conversations:
+                    context = "以下是之前的对话内容，请在回答时考虑这些上下文：\n\n"
+                    for user_msg, ai_msg in reversed(previous_conversations):
+                        context += f"用户: {user_msg}\n"
+                        context += f"AI: {ai_msg}\n\n"
+                
+                conn.close()
+            # 如果提供了对话时间戳，获取该对话的上下文
+            elif conversation_timestamp:
+                # 获取配置中的最大对话轮数
+                max_turns = config.get("maxConversationTurns", 10)
+                
+                # 连接数据库
+                conn = sqlite3.connect('neko.db')
+                cursor = conn.cursor()
+                
+                # 检查表结构
+                cursor.execute("PRAGMA table_info(conversations)")
+                columns = cursor.fetchall()
+                column_names = [col[1] for col in columns]
+                
+                # 确定使用哪个字段名
+                ai_field = 'ai_response' if 'ai_response' in column_names else 'ai_message'
+                
+                # 获取时间戳对应的对话组ID
+                cursor.execute(
+                    "SELECT group_id FROM conversations WHERE timestamp = ?",
+                    (conversation_timestamp,)
+                )
+                row = cursor.fetchone()
+                current_group_id = row[0] if row else None
+                
+                if current_group_id:
+                    # 获取指定对话组的对话（最多max_turns轮）
+                    query = f"""
+                        SELECT user_message, {ai_field}
+                        FROM conversations 
+                        WHERE group_id = ? 
+                        ORDER BY timestamp DESC 
+                        LIMIT ?
+                    """
+                    cursor.execute(query, (current_group_id, max_turns))
+                    previous_conversations = cursor.fetchall()
+                    
+                    # 构建上下文（按时间正序）
+                    if previous_conversations:
+                        context = "以下是之前的对话内容，请在回答时考虑这些上下文：\n\n"
+                        for user_msg, ai_msg in reversed(previous_conversations):
+                            context += f"用户: {user_msg}\n"
+                            context += f"AI: {ai_msg}\n\n"
+                    
+                    # 保存当前对话组ID
+                    group_id = current_group_id
+                else:
+                    # 如果没有找到对话组ID，使用原有的上下文获取方法
+                    context = get_context(message)
+                
+                conn.close()
+            else:
+                # 如果没有提供时间戳和对话组ID，使用原有的上下文获取方法
+                context = get_context(message)
+            
+            # 构建带有上下文的提示
+            system_message = "你是一个有记忆能力的AI助手。" + context
+            messages = [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": message},
+            ]
+            
+            # 记录完整prompt
+            logger.info("完整Prompt:")
+            logger.info(f"System: {system_message}")
+            logger.info(f"User: {message}")
 
-        # 获取AI响应
-        start_time = time.time()
-        response = client.chat.completions.create(
-            model=config["model"],
-            messages=messages,
-            max_tokens=4096
-        )
-        
-        full_response = response.choices[0].message.content
-        
-        # 计算token数和费用
-        input_tokens, output_tokens, cost = calculate_tokens_and_cost(
-            system_message + message, 
-            full_response
-        )
-        
-        with cost_lock:
-            total_cost += cost
-        
-        # 保存对话
-        save_conversation(message, full_response)
-        
-        # 返回响应
-        return jsonify({
-            'response': full_response,
-            'stats': {
-                'input_tokens': input_tokens,
-                'output_tokens': output_tokens,
-                'cost': cost,
-                'total_cost': total_cost,
-                'time': time.time() - start_time
+            # 获取AI响应（使用stream=True）
+            start_time = time.time()
+            full_response = ""
+            
+            # 使用流式响应
+            for response in client.chat.completions.create(
+                model=config["model"],
+                messages=messages,
+                max_tokens=4096,
+                stream=True  # 启用流式输出
+            ):
+                if response.choices[0].delta.content is not None:
+                    content = response.choices[0].delta.content
+                    full_response += content
+                    # 发送数据块
+                    yield f"data: {json.dumps({'content': content, 'done': False})}\n\n"
+
+            # 计算token数和费用
+            input_tokens, output_tokens, cost = calculate_tokens_and_cost(
+                system_message + message, 
+                full_response
+            )
+            
+            with cost_lock:
+                total_cost += cost
+            
+            # 保存对话
+            timestamp, saved_group_id = save_conversation(message, full_response, group_id, input_tokens + output_tokens, cost)
+            
+            # 发送完成标记和统计信息
+            stats_data = {
+                'content': '', 
+                'done': True, 
+                'stats': {
+                    'input_tokens': input_tokens,
+                    'output_tokens': output_tokens,
+                    'cost': cost,
+                    'total_cost': total_cost,
+                    'time': time.time() - start_time,
+                    'timestamp': timestamp,
+                    'group_id': saved_group_id
+                }
             }
-        })
-        
-    except Exception as e:
-        logger.error(f"处理聊天请求时出错: {e}")
-        return jsonify({'error': str(e)}), 500
+            yield f"data: {json.dumps(stats_data)}\n\n"
+            
+        except Exception as e:
+            logger.error(f"处理聊天请求时出错: {e}")
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+    
+    return Response(generate(), mimetype='text/event-stream')
 
 # 获取相似记忆API
 @app.route('/api/memories', methods=['POST'])
@@ -528,6 +806,7 @@ def clear_memory():
 # 获取统计信息API
 @app.route('/api/stats', methods=['GET'])
 def get_stats():
+    global total_cost
     try:
         # 获取SQLite中的记忆数量
         stats = db.get_stats()
@@ -585,6 +864,328 @@ def get_logs():
     except Exception as e:
         logger.error(f"获取日志失败: {e}")
         return jsonify({'logs': [], 'error': str(e)})
+
+# 获取对话历史API
+@app.route('/api/chat_history', methods=['GET'])
+def get_chat_history():
+    try:
+        # 获取分页参数
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 20, type=int)
+        
+        # 连接数据库
+        conn = sqlite3.connect('neko.db')
+        cursor = conn.cursor()
+        
+        # 检查表结构
+        cursor.execute("PRAGMA table_info(conversations)")
+        columns = cursor.fetchall()
+        column_names = [col[1] for col in columns]
+        
+        # 确定使用哪个字段名
+        ai_field = 'ai_response' if 'ai_response' in column_names else 'ai_message'
+        
+        # 获取总记录数
+        cursor.execute("SELECT COUNT(*) FROM conversations")
+        total_count = cursor.fetchone()[0]
+        
+        # 计算总页数
+        total_pages = (total_count + per_page - 1) // per_page
+        
+        # 获取指定页的对话记录
+        offset = (page - 1) * per_page
+        query = f"""
+            SELECT user_message, {ai_field}, timestamp, tokens, cost 
+            FROM conversations 
+            ORDER BY timestamp DESC 
+            LIMIT ? OFFSET ?
+        """
+        cursor.execute(query, (per_page, offset))
+        
+        # 构建结果
+        conversations = []
+        for row in cursor.fetchall():
+            user_message, ai_message, timestamp, tokens, cost = row
+            conversations.append({
+                'user_message': user_message,
+                'ai_message': ai_message,
+                'timestamp': timestamp,
+                'tokens': tokens,
+                'cost': cost,
+                'formatted_time': datetime.datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+            })
+        
+        conn.close()
+        
+        return jsonify({
+            'conversations': conversations,
+            'pagination': {
+                'current_page': page,
+                'per_page': per_page,
+                'total_pages': total_pages,
+                'total_count': total_count
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"获取对话历史时出错: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# 获取完整对话历史API
+@app.route('/api/full_conversation', methods=['GET'])
+def get_full_conversation():
+    try:
+        # 获取时间戳参数
+        timestamp = request.args.get('timestamp', type=float)
+        if not timestamp:
+            return jsonify({'error': '缺少时间戳参数'}), 400
+            
+        # 获取前后对话数量
+        before = request.args.get('before', 0, type=int)
+        after = request.args.get('after', 0, type=int)
+        
+        # 如果请求上下文但未指定数量，则使用配置文件中的设置
+        if before == -1 or after == -1:
+            max_turns = config.get("maxConversationTurns", 10)
+            before = max_turns // 2
+            after = max_turns // 2
+        
+        # 连接数据库
+        conn = sqlite3.connect('neko.db')
+        cursor = conn.cursor()
+        
+        # 检查表结构
+        cursor.execute("PRAGMA table_info(conversations)")
+        columns = cursor.fetchall()
+        column_names = [col[1] for col in columns]
+        
+        # 确定使用哪个字段名
+        ai_field = 'ai_response' if 'ai_response' in column_names else 'ai_message'
+        
+        # 构建结果
+        conversations = []
+        
+        # 如果before和after都为0，则只获取精确匹配时间戳的对话
+        if before == 0 and after == 0:
+            query = f"""
+                SELECT user_message, {ai_field}, timestamp, tokens, cost 
+                FROM conversations 
+                WHERE timestamp = ?
+            """
+            cursor.execute(query, (timestamp,))
+            row = cursor.fetchone()
+            
+            if row:
+                user_message, ai_message, ts, tokens, cost = row
+                conversations.append({
+                    'user_message': user_message,
+                    'ai_message': ai_message,
+                    'timestamp': ts,
+                    'tokens': tokens,
+                    'cost': cost,
+                    'formatted_time': datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
+                })
+        else:
+            # 获取指定时间戳前后的对话
+            query = f"""
+                SELECT user_message, {ai_field}, timestamp, tokens, cost 
+                FROM conversations 
+                WHERE timestamp <= ? 
+                ORDER BY timestamp DESC 
+                LIMIT ?
+            """
+            cursor.execute(query, (timestamp, before))
+            before_conversations = cursor.fetchall()
+            
+            query = f"""
+                SELECT user_message, {ai_field}, timestamp, tokens, cost 
+                FROM conversations 
+                WHERE timestamp > ? 
+                ORDER BY timestamp ASC 
+                LIMIT ?
+            """
+            cursor.execute(query, (timestamp, after))
+            after_conversations = cursor.fetchall()
+            
+            # 添加之前的对话（按时间正序）
+            for row in reversed(before_conversations):
+                user_message, ai_message, ts, tokens, cost = row
+                conversations.append({
+                    'user_message': user_message,
+                    'ai_message': ai_message,
+                    'timestamp': ts,
+                    'tokens': tokens,
+                    'cost': cost,
+                    'formatted_time': datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
+                })
+            
+            # 添加之后的对话
+            for row in after_conversations:
+                user_message, ai_message, ts, tokens, cost = row
+                conversations.append({
+                    'user_message': user_message,
+                    'ai_message': ai_message,
+                    'timestamp': ts,
+                    'tokens': tokens,
+                    'cost': cost,
+                    'formatted_time': datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
+                })
+        
+        conn.close()
+        
+        return jsonify({
+            'conversations': conversations,
+            'center_timestamp': timestamp
+        })
+        
+    except Exception as e:
+        logger.error(f"获取完整对话历史时出错: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# 获取对话组列表API
+@app.route('/api/conversation_groups', methods=['GET'])
+def get_conversation_groups():
+    try:
+        # 获取分页参数
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 20, type=int)
+        
+        # 计算偏移量
+        offset = (page - 1) * per_page
+        
+        # 获取对话组列表
+        groups, total_count = db.get_conversation_groups(per_page, offset)
+        
+        # 计算总页数
+        total_pages = (total_count + per_page - 1) // per_page
+        
+        return jsonify({
+            'groups': groups,
+            'pagination': {
+                'current_page': page,
+                'per_page': per_page,
+                'total_pages': total_pages,
+                'total_count': total_count
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"获取对话组列表时出错: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# 获取对话组内容API
+@app.route('/api/conversation_group/<group_id>', methods=['GET'])
+def get_conversation_group_content(group_id):
+    try:
+        # 获取对话组信息
+        group = db.get_conversation_group(group_id)
+        if not group:
+            return jsonify({'error': '对话组不存在'}), 404
+        
+        # 连接数据库
+        conn = sqlite3.connect('neko.db')
+        cursor = conn.cursor()
+        
+        # 检查表结构
+        cursor.execute("PRAGMA table_info(conversations)")
+        columns = cursor.fetchall()
+        column_names = [col[1] for col in columns]
+        
+        # 确定使用哪个字段名
+        ai_field = 'ai_response' if 'ai_response' in column_names else 'ai_message'
+        
+        # 获取对话组内的所有对话
+        query = f"""
+            SELECT user_message, {ai_field}, timestamp, tokens, cost 
+            FROM conversations 
+            WHERE group_id = ? 
+            ORDER BY timestamp ASC
+        """
+        cursor.execute(query, (group_id,))
+        
+        # 构建结果
+        conversations = []
+        for row in cursor.fetchall():
+            user_message, ai_message, timestamp, tokens, cost = row
+            conversations.append({
+                'user_message': user_message,
+                'ai_message': ai_message,
+                'timestamp': timestamp,
+                'tokens': tokens,
+                'cost': cost,
+                'formatted_time': datetime.datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+            })
+        
+        conn.close()
+        
+        return jsonify({
+            'group': group,
+            'conversations': conversations
+        })
+        
+    except Exception as e:
+        logger.error(f"获取对话组内容时出错: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# 创建对话组API
+@app.route('/api/conversation_groups', methods=['POST'])
+def create_conversation_group():
+    try:
+        data = request.json
+        title = data.get('title')
+        
+        # 创建新的对话组
+        group_id = db.create_conversation_group(title)
+        
+        # 获取对话组信息
+        group = db.get_conversation_group(group_id)
+        
+        return jsonify({
+            'success': True,
+            'group': group
+        })
+        
+    except Exception as e:
+        logger.error(f"创建对话组时出错: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# 更新对话组API
+@app.route('/api/conversation_groups/<group_id>', methods=['PUT'])
+def update_conversation_group(group_id):
+    try:
+        data = request.json
+        title = data.get('title')
+        
+        # 更新对话组
+        db.update_conversation_group(group_id, title)
+        
+        # 获取更新后的对话组信息
+        group = db.get_conversation_group(group_id)
+        
+        return jsonify({
+            'success': True,
+            'group': group
+        })
+        
+    except Exception as e:
+        logger.error(f"更新对话组时出错: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# 删除对话组API
+@app.route('/api/conversation_groups/<group_id>', methods=['DELETE'])
+def delete_conversation_group(group_id):
+    try:
+        # 删除对话组
+        db.delete_conversation_group(group_id)
+        
+        return jsonify({
+            'success': True,
+            'message': '对话组已删除'
+        })
+        
+    except Exception as e:
+        logger.error(f"删除对话组时出错: {e}")
+        return jsonify({'error': str(e)}), 500
 
 # 路由：静态文件
 @app.route('/static/<path:path>')
