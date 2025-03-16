@@ -731,6 +731,14 @@ def get_embedding(text: str) -> np.ndarray:
     if not text:
         raise ValueError("输入文本不能全为空白字符")
     
+    # 检查文本长度，如果过长则截断
+    # 中文每个字约1.5个token，8192 tokens约等于5000个字符
+    max_chars = 5000
+    if len(text) > max_chars:
+        logger.warning(f"文本过长 ({len(text)} 字符)，截断至 {max_chars} 字符")
+        print(f"{Fore.YELLOW}警告: 文本过长，已截断以符合API限制{Style.RESET_ALL}")
+        text = text[:max_chars]
+    
     # 准备API请求
     headers = {
         "Authorization": f"Bearer {client.api_key}",
