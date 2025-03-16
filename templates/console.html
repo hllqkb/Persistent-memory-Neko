@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neko AI - 控制台</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .console-output {
+            font-family: 'JetBrains Mono', monospace;
+        }
+        /* 自定义滚动条 */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 10px;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 10px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+        /* 控制台行 */
+        .console-line {
+            white-space: pre-wrap;
+            word-break: break-all;
+            padding: 2px 0;
+        }
+    </style>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        primary: {
+                            50: '#f0f9ff',
+                            100: '#e0f2fe',
+                            200: '#bae6fd',
+                            300: '#7dd3fc',
+                            400: '#38bdf8',
+                            500: '#0ea5e9',
+                            600: '#0284c7',
+                            700: '#0369a1',
+                            800: '#075985',
+                            900: '#0c4a6e',
+                        },
+                        secondary: {
+                            50: '#f5f3ff',
+                            100: '#ede9fe',
+                            200: '#ddd6fe',
+                            300: '#c4b5fd',
+                            400: '#a78bfa',
+                            500: '#8b5cf6',
+                            600: '#7c3aed',
+                            700: '#6d28d9',
+                            800: '#5b21b6',
+                            900: '#4c1d95',
+                        },
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-gray-100 dark:bg-gray-900 transition-colors duration-200">
+    <div class="flex flex-col h-screen">
+        <!-- 顶部导航 -->
+        <div class="bg-white dark:bg-gray-800 shadow-sm">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="flex justify-between h-16">
+                    <div class="flex">
+                        <div class="flex-shrink-0 flex items-center">
+                            <a href="/" class="flex items-center">
+                                <img class="h-8 w-auto" src="https://images.unsplash.com/photo-1543852786-1cf6624b9987?ixlib=rb-4.0.3&ixid=MnwxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8&auto=format&fit=crop&w=687&q=80" alt="Neko AI Logo">
+                                <span class="ml-2 text-lg font-semibold text-gray-900 dark:text-white">Neko AI 控制台</span>
+                </a>
+            </div>
+            </div>
+            <div class="flex items-center">
+                        <button id="theme-toggle" class="p-2 rounded-full text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700">
+                            <i class="fas fa-moon dark:hidden"></i>
+                            <i class="fas fa-sun hidden dark:block"></i>
+                </button>
+                        <a href="/" class="ml-4 px-3 py-2 rounded-md text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                            <i class="fas fa-home mr-1"></i> 返回主页
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 主内容区 -->
+        <div class="flex-1 flex overflow-hidden">
+            <!-- 侧边栏 -->
+            <div class="w-64 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 flex-shrink-0">
+                <div class="h-full flex flex-col">
+                    <div class="flex-1 overflow-y-auto py-4 px-3 space-y-6">
+                        <div>
+                            <h3 class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                                系统信息
+                            </h3>
+                            <div class="mt-2 space-y-1">
+                                <div class="flex justify-between text-sm">
+                                    <span class="text-gray-600 dark:text-gray-300">内存数量</span>
+                                    <span id="memory-count" class="text-gray-900 dark:text-white">0</span>
+                                </div>
+                                <div class="flex justify-between text-sm">
+                                    <span class="text-gray-600 dark:text-gray-300">对话数量</span>
+                                    <span id="conversation-count" class="text-gray-900 dark:text-white">0</span>
+                                </div>
+                                <div class="flex justify-between text-sm">
+                                    <span class="text-gray-600 dark:text-gray-300">总费用</span>
+                                    <span id="total-cost" class="text-gray-900 dark:text-white">¥0.00</span>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div>
+                            <h3 class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                                操作
+                            </h3>
+                            <div class="mt-2 space-y-2">
+                                <button id="clear-logs" class="w-full flex items-center px-3 py-2 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                                    <i class="fas fa-trash-alt mr-2"></i>
+                                    清除日志
+                                </button>
+                                <button id="clear-memory" class="w-full flex items-center px-3 py-2 text-sm font-medium rounded-md text-white bg-red-600 hover:bg-red-700">
+                                    <i class="fas fa-trash-alt mr-2"></i>
+                                    清除所有记忆
+                                </button>
+                                <button id="reload-stats" class="w-full flex items-center px-3 py-2 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                                    <i class="fas fa-sync-alt mr-2"></i>
+                                    刷新统计信息
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <div>
+                            <h3 class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                                日志级别
+                            </h3>
+                            <div class="mt-2 space-y-1">
+                                <div class="flex items-center">
+                                    <input id="log-level-all" name="log-level" type="radio" checked class="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded">
+                                    <label for="log-level-all" class="ml-2 block text-sm text-gray-700 dark:text-gray-300">
+                                        全部
+                                    </label>
+                                </div>
+                                <div class="flex items-center">
+                                    <input id="log-level-info" name="log-level" type="radio" class="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded">
+                                    <label for="log-level-info" class="ml-2 block text-sm text-gray-700 dark:text-gray-300">
+                                        信息
+                                    </label>
+                                </div>
+                                <div class="flex items-center">
+                                    <input id="log-level-warning" name="log-level" type="radio" class="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded">
+                                    <label for="log-level-warning" class="ml-2 block text-sm text-gray-700 dark:text-gray-300">
+                                        警告
+                                    </label>
+                                </div>
+                                <div class="flex items-center">
+                                    <input id="log-level-error" name="log-level" type="radio" class="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded">
+                                    <label for="log-level-error" class="ml-2 block text-sm text-gray-700 dark:text-gray-300">
+                                        错误
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="border-t border-gray-200 dark:border-gray-700 p-4">
+                        <div class="text-xs text-gray-500 dark:text-gray-400">
+                            <p>Neko AI 控制台</p>
+                            <p class="mt-1">版本: 1.0.0</p>
+                        </div>
+                    </div>
+                </div>
+        </div>
+        
+            <!-- 控制台输出 -->
+            <div class="flex-1 flex flex-col bg-gray-50 dark:bg-gray-900 overflow-hidden">
+                <div class="flex items-center justify-between px-4 py-2 bg-gray-200 dark:bg-gray-800 border-b border-gray-300 dark:border-gray-700">
+            <div class="flex items-center">
+                        <i class="fas fa-terminal mr-2 text-gray-700 dark:text-gray-300"></i>
+                        <span class="text-sm font-medium text-gray-700 dark:text-gray-300">系统日志</span>
+                    </div>
+                    <div class="flex items-center space-x-2">
+                        <button id="auto-scroll" class="p-1 rounded text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-700 active:bg-gray-400 dark:active:bg-gray-600">
+                            <i class="fas fa-arrow-down"></i>
+                        </button>
+                        <button id="copy-logs" class="p-1 rounded text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-700 active:bg-gray-400 dark:active:bg-gray-600">
+                            <i class="fas fa-copy"></i>
+                        </button>
+                    </div>
+                </div>
+                <div id="console-output" class="flex-1 overflow-y-auto p-4 bg-gray-900 text-gray-300 font-mono text-sm">
+                    <!-- 日志将通过JavaScript动态添加 -->
+                    <div class="console-line">
+                        <span class="text-gray-400">[系统]</span> 正在加载日志...
+                    </div>
+                </div>
+                <div class="px-4 py-2 bg-gray-200 dark:bg-gray-800 border-t border-gray-300 dark:border-gray-700">
+                    <div class="flex">
+                        <input id="command-input" type="text" class="flex-1 px-3 py-2 bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-l-md shadow-sm focus:outline-none focus:ring-primary-500 focus:border-primary-500 text-gray-900 dark:text-white" placeholder="输入命令...">
+                        <button id="send-command" class="px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-r-md">
+                            <i class="fas fa-paper-plane"></i>
+                </button>
+                    </div>
+                    <div class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                        可用命令: help, stats, clear, exit
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // DOM元素
+        const themeToggle = document.getElementById('theme-toggle');
+        const consoleOutput = document.getElementById('console-output');
+        const commandInput = document.getElementById('command-input');
+        const sendCommand = document.getElementById('send-command');
+        const clearLogs = document.getElementById('clear-logs');
+        const clearMemory = document.getElementById('clear-memory');
+        const reloadStats = document.getElementById('reload-stats');
+        const autoScroll = document.getElementById('auto-scroll');
+        const copyLogs = document.getElementById('copy-logs');
+        const logLevelAll = document.getElementById('log-level-all');
+        const logLevelInfo = document.getElementById('log-level-info');
+        const logLevelWarning = document.getElementById('log-level-warning');
+        const logLevelError = document.getElementById('log-level-error');
+        
+        // 自动滚动标志
+        let isAutoScroll = true;
+        
+        // 初始化
+        document.addEventListener('DOMContentLoaded', function() {
+            // 检查主题
+            checkTheme();
+            
+            // 加载日志
+            loadLogs();
+            
+            // 加载统计信息
+            loadStats();
+            
+            // 设置事件监听器
+            setupEventListeners();
+        });
+        
+        // 检查主题
+        function checkTheme() {
+            if (localStorage.getItem('theme') === 'dark' || 
+                (!localStorage.getItem('theme') && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+                document.documentElement.classList.add('dark');
+            } else {
+                document.documentElement.classList.remove('dark');
+            }
+        }
+        
+        // 切换主题
+        function toggleTheme() {
+            if (document.documentElement.classList.contains('dark')) {
+                document.documentElement.classList.remove('dark');
+                localStorage.setItem('theme', 'light');
+            } else {
+                document.documentElement.classList.add('dark');
+                localStorage.setItem('theme', 'dark');
+            }
+        }
+        
+        // 设置事件监听器
+        function setupEventListeners() {
+            // 主题切换
+            themeToggle.addEventListener('click', toggleTheme);
+            
+            // 发送命令
+            sendCommand.addEventListener('click', executeCommand);
+            commandInput.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') {
+                    executeCommand();
+                }
+            });
+            
+            // 清除日志
+            clearLogs.addEventListener('click', function() {
+                consoleOutput.innerHTML = '';
+                addLogLine('日志已清除', 'system');
+            });
+            
+            // 清除记忆
+            clearMemory.addEventListener('click', function() {
+                if (confirm('确定要清除所有记忆吗？此操作不可撤销。')) {
+                    clearAllMemory();
+                }
+            });
+            
+            // 刷新统计信息
+            reloadStats.addEventListener('click', loadStats);
+            
+            // 自动滚动
+            autoScroll.addEventListener('click', function() {
+                isAutoScroll = !isAutoScroll;
+                this.classList.toggle('bg-primary-500');
+                this.classList.toggle('text-white');
+                if (isAutoScroll) {
+                    scrollToBottom();
+                }
+            });
+            
+            // 复制日志
+            copyLogs.addEventListener('click', function() {
+                const logText = consoleOutput.innerText;
+                navigator.clipboard.writeText(logText).then(function() {
+                    addLogLine('日志已复制到剪贴板', 'system');
+                }, function() {
+                    addLogLine('复制失败，请手动复制', 'error');
+                });
+            });
+            
+            // 日志级别过滤
+            logLevelAll.addEventListener('change', filterLogs);
+            logLevelInfo.addEventListener('change', filterLogs);
+            logLevelWarning.addEventListener('change', filterLogs);
+            logLevelError.addEventListener('change', filterLogs);
+        }
+        
+        // 加载日志
+        function loadLogs() {
+            fetch('/api/logs')
+                .then(response => response.json())
+                .then(data => {
+                    consoleOutput.innerHTML = '';
+                    if (data.logs && data.logs.length > 0) {
+                        data.logs.forEach(log => {
+                            addLogLine(log.message, log.level, log.timestamp);
+                        });
+                        scrollToBottom();
+                    } else {
+                        addLogLine('没有可用的日志', 'system');
+                    }
+                })
+                .catch(error => {
+                    console.error('获取日志失败:', error);
+                    addLogLine('获取日志失败: ' + error.message, 'error');
+                });
+        }
+        
+        // 加载统计信息
+        function loadStats() {
+            fetch('/api/stats')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('conversation-count').textContent = data.conversation_count;
+                    document.getElementById('total-cost').textContent = `¥${data.total_cost.toFixed(2)}`;
+                    
+                    // 获取内存数量
+                    fetch('/api/memory_count')
+                        .then(response => response.json())
+                        .then(memoryData => {
+                            document.getElementById('memory-count').textContent = memoryData.count;
+                        })
+                        .catch(error => {
+                            console.error('获取内存数量失败:', error);
+                            document.getElementById('memory-count').textContent = '获取失败';
+                        });
+                })
+                .catch(error => {
+                    console.error('获取统计信息失败:', error);
+                    document.getElementById('conversation-count').textContent = '获取失败';
+                    document.getElementById('total-cost').textContent = '获取失败';
+                });
+        }
+        
+        // 执行命令
+        function executeCommand() {
+            const command = commandInput.value.trim();
+            if (!command) return;
+            
+            addLogLine(`> ${command}`, 'command');
+            
+            switch (command.toLowerCase()) {
+                case 'help':
+                    showHelp();
+                    break;
+                case 'stats':
+                    showStats();
+                    break;
+                case 'clear':
+                    consoleOutput.innerHTML = '';
+                    addLogLine('控制台已清除', 'system');
+                    break;
+                case 'exit':
+                    window.location.href = '/';
+                    break;
+                default:
+                    addLogLine(`未知命令: ${command}。输入 'help' 查看可用命令。`, 'error');
+            }
+            
+            commandInput.value = '';
+        }
+        
+        // 显示帮助
+        function showHelp() {
+            const helpText = `
+可用命令:
+  help   - 显示此帮助信息
+  stats  - 显示系统统计信息
+  clear  - 清除控制台
+  exit   - 返回主页
+            `;
+            addLogLine(helpText, 'info');
+        }
+        
+        // 显示统计信息
+        function showStats() {
+            fetch('/api/stats')
+                .then(response => response.json())
+                .then(data => {
+                    const statsText = `
+系统统计信息:
+  对话数量: ${data.conversation_count}
+  总费用: ¥${data.total_cost.toFixed(2)}
+                    `;
+                    addLogLine(statsText, 'info');
+                })
+                .catch(error => {
+                    addLogLine('获取统计信息失败: ' + error.message, 'error');
+                });
+        }
+        
+        // 清除所有记忆
+        function clearAllMemory() {
+            fetch('/api/clear_memory', {
+                method: 'POST',
+            })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        addLogLine('所有记忆已成功清除', 'success');
+                        loadStats();
+                    } else {
+                        addLogLine('清除记忆失败: ' + data.error, 'error');
+                    }
+                })
+                .catch(error => {
+                    addLogLine('清除记忆请求失败: ' + error.message, 'error');
+                });
+        }
+        
+        // 添加日志行
+        function addLogLine(message, level = 'info', timestamp = null) {
+            const now = timestamp ? new Date(timestamp * 1000) : new Date();
+            const timeStr = now.toLocaleTimeString();
+            
+            let levelClass = '';
+            let levelIcon = '';
+            let levelText = '';
+            
+            switch (level) {
+                case 'error':
+                    levelClass = 'text-red-500';
+                    levelIcon = '<i class="fas fa-times-circle"></i>';
+                    levelText = 'ERROR';
+                    break;
+                case 'warning':
+                    levelClass = 'text-yellow-500';
+                    levelIcon = '<i class="fas fa-exclamation-triangle"></i>';
+                    levelText = 'WARN';
+                    break;
+                case 'success':
+                    levelClass = 'text-green-500';
+                    levelIcon = '<i class="fas fa-check-circle"></i>';
+                    levelText = 'SUCCESS';
+                    break;
+                case 'system':
+                    levelClass = 'text-purple-500';
+                    levelIcon = '<i class="fas fa-cog"></i>';
+                    levelText = 'SYSTEM';
+                    break;
+                case 'command':
+                    levelClass = 'text-gray-400';
+                    levelIcon = '';
+                    levelText = '';
+                    break;
+                default:
+                    levelClass = 'text-blue-500';
+                    levelIcon = '<i class="fas fa-info-circle"></i>';
+                    levelText = 'INFO';
+            }
+            
+            const logLine = document.createElement('div');
+            logLine.className = `console-line ${level}-log`;
+            
+            if (level !== 'command') {
+                logLine.innerHTML = `<span class="text-gray-400">[${timeStr}]</span> <span class="${levelClass}">${levelIcon} ${levelText}</span> ${message}`;
+            } else {
+                logLine.innerHTML = `<span class="${levelClass}">${message}</span>`;
+            }
+            
+            consoleOutput.appendChild(logLine);
+            
+            if (isAutoScroll) {
+                scrollToBottom();
+            }
+        }
+        
+        // 滚动到底部
+        function scrollToBottom() {
+            consoleOutput.scrollTop = consoleOutput.scrollHeight;
+        }
+        
+        // 过滤日志
+        function filterLogs() {
+            const logLines = document.querySelectorAll('.console-line');
+            
+            if (logLevelAll.checked) {
+                logLines.forEach(line => {
+                    line.style.display = '';
+                });
+                return;
+            }
+            
+            const showInfo = logLevelInfo.checked;
+            const showWarning = logLevelWarning.checked;
+            const showError = logLevelError.checked;
+            
+            logLines.forEach(line => {
+                if (line.classList.contains('info-log') && showInfo) {
+                    line.style.display = '';
+                } else if (line.classList.contains('warning-log') && showWarning) {
+                    line.style.display = '';
+                } else if (line.classList.contains('error-log') && showError) {
+                    line.style.display = '';
+                } else if (line.classList.contains('system-log') || line.classList.contains('command-log') || line.classList.contains('success-log')) {
+                    line.style.display = '';
+                } else {
+                    line.style.display = 'none';
+                }
+            });
+        }
+    </script>
+</body>
+</html> 
