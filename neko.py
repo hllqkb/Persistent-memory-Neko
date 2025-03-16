@@ -13,6 +13,8 @@ from typing import List, Dict, Any, Optional
 import time
 from colorama import Fore, Back, Style, init
 import jieba.analyse
+import re
+import yaml
 
 # 初始化colorama
 init(autoreset=True)  # autoreset=True 使每次打印后自动恢复默认颜色
@@ -27,11 +29,11 @@ def setup_logger():
     if not os.path.exists('logs'):
         os.makedirs('logs')
     
-    # 设置日志文件，使用 RotatingFileHandler 进行日志轮转
-    handler = RotatingFileHandler(
+    # 设置日志文件，使用 FileHandler 而不是 RotatingFileHandler
+    # 'w' 模式会覆盖已存在的日志文件
+    handler = logging.FileHandler(
         'logs/neko.log',
-        maxBytes=10*1024*1024,  # 10MB
-        backupCount=5,
+        mode='w',  # 使用 'w' 模式覆盖已存在的日志文件
         encoding='utf-8'
     )
     
@@ -40,6 +42,11 @@ def setup_logger():
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     handler.setFormatter(formatter)
+    
+    # 移除所有已存在的处理器
+    logger.handlers.clear()
+    
+    # 添加新的处理器
     logger.addHandler(handler)
     
     return logger
@@ -47,10 +54,72 @@ def setup_logger():
 # 初始化日志记录器
 logger = setup_logger()
 
+# 将 load_config 函数定义移到文件前面
+def load_config():
+    """加载配置文件"""
+    try:
+        # 首先尝试加载 YAML 格式
+        try:
+            with open('config.yaml', 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+                if config:
+                    print(f"{Fore.GREEN}YAML配置文件加载成功{Style.RESET_ALL}")
+                    return config
+        except Exception as yaml_error:
+            print(f"{Fore.YELLOW}加载YAML配置失败: {str(yaml_error)}, 尝试加载JSON配置{Style.RESET_ALL}")
+        
+        # 尝试加载标准 JSON
+        try:
+            with open('config.json', 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                print(f"{Fore.GREEN}JSON配置文件加载成功{Style.RESET_ALL}")
+                return config
+        except Exception as json_error:
+            print(f"{Fore.YELLOW}加载JSON配置失败: {str(json_error)}{Style.RESET_ALL}")
+            raise  # 重新抛出异常，触发默认配置
+            
+    except Exception as e:
+        print(f"{Fore.RED}加载配置文件失败: {str(e)}{Style.RESET_ALL}")
+        logger.error(f"加载配置文件失败: {str(e)}")
+        # 返回默认配置
+        return {
+            "api": {
+                "key": "sk-jivwbgqsesocbzkggntyzjwlkvlyhuiaphesburlvyswzsfc",
+                "base_url": "https://api.siliconflow.cn/v1",
+                "timeout": 30
+            },
+            "model": {
+                "name": "Pro/deepseek-ai/DeepSeek-V3",
+                "temperature": 0.7,
+                "max_tokens": 4096
+            },
+            "embedding": {
+                "model": "BAAI/bge-large-zh-v1.5",
+                "timeout": 30
+            },
+            "storage": {
+                "neo4j": {
+                    "uri": "bolt://localhost:7687",
+                    "user": "neo4j",
+                    "password": "12345678"
+                },
+                "faiss": {
+                    "dimension": 1024,
+                    "index_type": "flat"
+                }
+            }
+        }
+
+# 初始化日志记录器
+logger = setup_logger()
+
+# 加载配置
+config = load_config()
+
 # 初始化 OpenAI 客户端
 client = OpenAI(
-    api_key="sk-jivwbgqsesocbzkggntyzjwlkvlyhuiaphesburlvyswzsfc",
-    base_url="https://api.siliconflow.cn/v1"
+    api_key=config["api"]["key"],
+    base_url=config["api"]["base_url"]
 )
 
 class Memory:
@@ -76,6 +145,10 @@ class Memory:
 # 初始化 Neo4j
 class Neo4jDatabase:
     def __init__(self, uri="bolt://localhost:7687", user="neo4j", password="12345678"):
+        # 确保密码是字符串类型
+        if not isinstance(password, str):
+            password = str(password)
+        
         self.driver = GraphDatabase.driver(uri, auth=(user, password))
         self.init_database()
 
@@ -131,7 +204,7 @@ class Neo4jDatabase:
                     print(f"发现高度相似的记忆 (相似度: {memory.similarity:.4f})，跳过创建")
                     return memory.timestamp  # 直接返回已存在的记忆时间戳
             
-            # 创建新记忆节点 - 只存储元数据，不存储完整对话内容
+            # 创建新记忆节点
             session.run("""
                 CREATE (m:Memory {
                     timestamp: $timestamp,
@@ -154,10 +227,11 @@ class Neo4jDatabase:
             
             for memory in sorted_memories:
                 if memory.timestamp not in processed_timestamps and similarity_threshold <= memory.similarity <= 0.95:
-                    # 检查是否已经存在相似的关系路径
+                    # 检查是否已经存在相似的关系路径，限制深度为10
                     existing_relations = session.run("""
-                        MATCH path = (m1:Memory)-[r:SIMILAR_TO*]-(m2:Memory)
+                        MATCH path = (m1:Memory)-[r:SIMILAR_TO*1..10]-(m2:Memory)
                         WHERE m1.timestamp = $timestamp1 AND m2.timestamp = $timestamp2
+                        AND length(path) <= 10
                         RETURN count(path) as path_count
                     """, timestamp1=timestamp, timestamp2=memory.timestamp).single()
                     
@@ -165,11 +239,12 @@ class Neo4jDatabase:
                         print(f"已存在关系路径，跳过创建 (相似度: {memory.similarity:.4f})")
                         continue
                     
-                    # 创建新的关系
+                    # 创建新的关系，同时检查路径深度
                     session.run("""
                         MATCH (m1:Memory {timestamp: $new_timestamp})
                         MATCH (m2:Memory {timestamp: $old_timestamp})
                         WHERE m1 <> m2
+                        AND NOT EXISTS((m1)-[:SIMILAR_TO*1..10]-(m2))
                         MERGE (m1)-[r:SIMILAR_TO {similarity: $similarity}]->(m2)
                         MERGE (m2)-[r2:SIMILAR_TO {similarity: $similarity}]->(m1)
                     """,
@@ -181,34 +256,29 @@ class Neo4jDatabase:
         
         return timestamp
 
-    def get_related_memories(self, timestamp: str, max_depth: int = 2, min_similarity: float = 0.8) -> List[Memory]:
+    def get_related_memories(self, timestamp: str, max_depth: int = 10, min_similarity: float = 0.75) -> List[Memory]:
         """通过图关系获取相关记忆
         
         Args:
             timestamp: 起始记忆的时间戳
-            max_depth: 最大搜索深度
+            max_depth: 最大搜索深度，默认为10
             min_similarity: 最小相似度阈值 (0.0-1.0)
             
         Returns:
             List[Memory]: 相关记忆列表，按相似度降序排序，去重
         """
         with self.driver.session() as session:
-            # 优化查询语句:
-            # 1. 使用 DISTINCT 去重
-            # 2. 添加相似度过滤
-            # 3. 优化路径搜索
             query = f"""
                 MATCH (start:Memory {{timestamp: $timestamp}})
                 MATCH path = (start)-[r:SIMILAR_TO*1..{max_depth}]-(related:Memory)
-                WHERE start <> related AND
-                      ALL(rel IN relationships(path) WHERE rel.similarity >= $min_similarity)
+                WHERE start <> related 
+                AND ALL(rel IN relationships(path) WHERE rel.similarity >= $min_similarity)
+                AND length(path) <= {max_depth}
                 WITH DISTINCT related,
                      reduce(s = 1.0, rel IN relationships(path) | s * rel.similarity) as total_similarity,
                      length(path) as path_length
                 ORDER BY total_similarity DESC, path_length ASC
-                RETURN related.user_message as user_message,
-                       related.ai_response as ai_response,
-                       related.timestamp as timestamp,
+                RETURN related.timestamp as timestamp,
                        total_similarity
             """
             result = session.run(
@@ -222,17 +292,21 @@ class Neo4jDatabase:
             memories = []
             
             for record in result:
-                timestamp = record["timestamp"]
-                if timestamp not in seen_timestamps:
-                    memories.append(Memory(
-                        user_message=record["user_message"],
-                        ai_response=record["ai_response"],
-                        timestamp=timestamp,
-                        similarity=record["total_similarity"]
-                    ))
-                    seen_timestamps.add(timestamp)
-            
-            return memories
+                ts = record["timestamp"]
+                if ts not in seen_timestamps:
+                    # 从FAISS获取完整记忆
+                    memory = memory_store.get_memory_by_timestamp(ts)
+                    
+                    # 如果FAISS中没有，则从Neo4j获取预览
+                    if not memory:
+                        memory = self.get_memory_by_timestamp(ts)
+                    
+                    if memory:
+                        memory.similarity = record["total_similarity"]
+                        memories.append(memory)
+                        seen_timestamps.add(ts)
+        
+        return memories
 
     def get_recent_memories(self, limit: int = 5) -> List[Memory]:
         """获取最近的记忆"""
@@ -347,6 +421,41 @@ class Neo4jDatabase:
                 
                 return [record["timestamp"] for record in result]
 
+    def get_memory_by_timestamp(self, timestamp: str) -> Optional[Memory]:
+        """根据时间戳从Neo4j获取记忆，如果Neo4j中没有完整内容，则从FAISS获取
+        
+        Args:
+            timestamp: 记忆的时间戳
+            
+        Returns:
+            Optional[Memory]: 找到的记忆对象，未找到则返回None
+        """
+        with self.driver.session() as session:
+            # 首先从Neo4j获取记忆预览
+            result = session.run("""
+                MATCH (m:Memory {timestamp: $timestamp})
+                RETURN m.user_message_preview as user_preview, 
+                       m.ai_response_preview as ai_preview,
+                       m.topic as topic
+            """, timestamp=timestamp).single()
+            
+            if not result:
+                return None
+                
+            # 从FAISS获取完整内容
+            full_memory = memory_store.get_memory_by_timestamp(timestamp)
+            
+            if full_memory:
+                # 如果FAISS中有完整内容，直接返回
+                return full_memory
+            else:
+                # 如果FAISS中没有完整内容，使用Neo4j中的预览创建Memory对象
+                return Memory(
+                    user_message=result["user_preview"],
+                    ai_response=result["ai_preview"],
+                    timestamp=timestamp
+                )
+
 def export_memories(format="markdown", keyword=None):
     """导出记忆为可读格式
     
@@ -450,46 +559,66 @@ print(f"{Fore.GREEN}export:关键词{Style.RESET_ALL} - 导出包含特定关键
 print(f"{Fore.GREEN}export:格式 关键词{Style.RESET_ALL} - 导出包含特定关键词的记忆为指定格式")
 # 初始化 FAISS 向量存储
 class FAISSMemoryStore:
-    def __init__(self, dimension=1024):  # bge-large-zh 模型的维度是1024
+    def __init__(self, dimension=1024, index_type="flat", index_path="faiss_index.pkl"):
         self.dimension = dimension
-        self.index = faiss.IndexFlatL2(dimension)
-        self.texts: List[Dict[str, Any]] = []
-        self.load_or_create_index()
-        print(f"FAISS向量存储初始化完成，维度：{dimension}")
-
-    def load_or_create_index(self):
-        if os.path.exists('faiss_index.bin') and os.path.exists('faiss_texts.pkl'):
-            self.index = faiss.read_index('faiss_index.bin')
-            with open('faiss_texts.pkl', 'rb') as f:
-                loaded_texts = pickle.load(f)
-                # 处理旧格式数据
-                self.texts = []
-                for item in loaded_texts:
-                    if isinstance(item, str):
-                        # 旧格式：直接存储的文本字符串
-                        # 使用当前时间作为临时时间戳
-                        self.texts.append({
-                            "text": item,
-                            "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-                        })
-                    else:
-                        # 新格式：包含text和timestamp的字典
-                        self.texts.append(item)
-            print(f"已加载现有索引，包含 {len(self.texts)} 条记忆")
-            
-            # 如果检测到旧格式数据，立即保存为新格式
-            if any(isinstance(item, str) for item in loaded_texts):
-                print("检测到旧格式数据，正在转换为新格式...")
-                self.save_index()
+        self.index_type = index_type
+        self.index_path = index_path
+        self.texts = []
+        
+        # 尝试加载现有索引
+        if os.path.exists(self.index_path):
+            try:
+                print(f"{Fore.GREEN}加载FAISS索引文件: {self.index_path}{Style.RESET_ALL}")
+                with open(self.index_path, 'rb') as f:
+                    data = pickle.load(f)
+                    self.index = data['index']
+                    self.texts = data.get('texts', [])
+                print(f"{Fore.GREEN}FAISS索引加载成功，包含 {len(self.texts)} 条记忆{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}加载FAISS索引失败: {str(e)}，将创建新索引{Style.RESET_ALL}")
+                logger.error(f"加载FAISS索引失败: {str(e)}")
+                self._create_new_index()
         else:
+            print(f"{Fore.YELLOW}FAISS索引文件不存在，创建新索引{Style.RESET_ALL}")
+            self._create_new_index()
+            # 立即保存空索引，避免下次启动时再次提示
+            self.save_index()
+            print(f"{Fore.GREEN}已创建并保存新的FAISS索引{Style.RESET_ALL}")
+    
+    def _create_new_index(self):
+        """创建新的FAISS索引"""
+        if self.index_type.lower() == "flat":
             self.index = faiss.IndexFlatL2(self.dimension)
-            self.texts = []
-            print("创建新的FAISS索引")
+        elif self.index_type.lower() == "ivf":
+            # IVF索引需要训练，这里使用简单的随机数据
+            quantizer = faiss.IndexFlatL2(self.dimension)
+            self.index = faiss.IndexIVFFlat(quantizer, self.dimension, 100)
+            # 生成随机训练数据
+            np.random.seed(42)
+            train_data = np.random.random((1000, self.dimension)).astype('float32')
+            self.index.train(train_data)
+        else:
+            # 默认使用Flat索引
+            self.index = faiss.IndexFlatL2(self.dimension)
+        
+        self.texts = []
 
     def save_index(self):
-        faiss.write_index(self.index, 'faiss_index.bin')
-        with open('faiss_texts.pkl', 'wb') as f:
-            pickle.dump(self.texts, f)
+        """保存索引到文件"""
+        try:
+            # 确保目录存在
+            index_dir = os.path.dirname(self.index_path)
+            if index_dir and not os.path.exists(index_dir):
+                os.makedirs(index_dir)
+                
+            with open(self.index_path, 'wb') as f:
+                pickle.dump({'index': self.index, 'texts': self.texts}, f)
+            print(f"{Fore.GREEN}FAISS索引已保存，包含 {len(self.texts)} 条记忆{Style.RESET_ALL}")
+            return True
+        except Exception as e:
+            print(f"{Fore.RED}保存FAISS索引失败: {str(e)}{Style.RESET_ALL}")
+            logger.error(f"保存FAISS索引失败: {str(e)}")
+            return False
 
     def add_text(self, text: str, embedding: np.ndarray, timestamp: str):
         """添加新的记忆到FAISS索引
@@ -563,7 +692,7 @@ class FAISSMemoryStore:
         Returns:
             Optional[Memory]: 找到的记忆对象，未找到则返回None
         """
-        for i, item in enumerate(self.texts):
+        for item in self.texts:
             if item.get("timestamp") == timestamp:
                 text = item["text"]
                 parts = text.split("\n助手: ")
@@ -579,26 +708,75 @@ class FAISSMemoryStore:
 
 def get_embedding(text: str) -> np.ndarray:
     """使用 SiliconFlow API 获取文本嵌入向量"""
-    start_time = time.time()
+    if not text or not isinstance(text, str):
+        raise ValueError("输入文本不能为空且必须是字符串类型")
+        
+    # 清理和预处理文本
+    text = text.strip()
+    if not text:
+        raise ValueError("输入文本不能全为空白字符")
+    
+    # 准备API请求
     headers = {
         "Authorization": f"Bearer {client.api_key}",
         "Content-Type": "application/json"
     }
+    
+    # 从配置中获取embedding模型
+    embedding_model = config["embedding"]["model"]
+    timeout = config["embedding"]["timeout"]
+    
+    # API请求数据
     data = {
-        "model": "BAAI/bge-m3",
+        "model": embedding_model,
         "input": text,
         "encoding_format": "float"
     }
-    response = requests.post(
-        "https://api.siliconflow.cn/v1/embeddings",
-        headers=headers,
-        json=data
-    )
-    if response.status_code == 200:
-        embedding = np.array(response.json()["data"][0]["embedding"], dtype=np.float32)
-        return embedding
-    else:
-        raise Exception(f"获取嵌入向量失败: {response.text}")
+    
+    try:
+        # 发送请求
+        response = requests.post(
+            f"{config['api']['base_url']}/embeddings",
+            headers=headers,
+            json=data,
+            timeout=timeout
+        )
+        
+        # 检查响应状态
+        if response.status_code != 200:
+            error_msg = f"API请求失败 (状态码: {response.status_code}): {response.text}"
+            logger.error(error_msg)
+            raise Exception(error_msg)
+        
+        # 解析响应
+        result = response.json()
+        
+        # 检查响应格式
+        if not isinstance(result, dict) or 'data' not in result:
+            raise Exception(f"API返回格式错误: {result}")
+            
+        if not result['data'] or not isinstance(result['data'], list):
+            raise Exception(f"API返回数据为空或格式错误: {result}")
+            
+        # 获取embedding
+        embedding = result['data'][0]['embedding']
+        
+        # 转换为numpy数组
+        return np.array(embedding, dtype=np.float32)
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"API请求失败: {str(e)}")
+        raise Exception(f"获取embedding失败: {str(e)}")
+        
+    except (KeyError, IndexError, ValueError) as e:
+        logger.error(f"处理API响应时出错: {str(e)}")
+        raise Exception(f"处理embedding响应失败: {str(e)}")
+        
+    except Exception as e:
+        logger.error(f"获取embedding时发生未知错误: {str(e)}")
+        if response and response.text:
+            logger.error(f"API响应: {response.text}")
+        raise Exception(f"获取embedding失败: {str(e)}")
 
 def extract_topic(text: str) -> str:
     """从文本中提取主题关键词
@@ -618,74 +796,142 @@ def extract_topic(text: str) -> str:
 
 # 初始化向量存储和数据库
 memory_store = FAISSMemoryStore()
-neo4j_db = Neo4jDatabase()
+neo4j_db = Neo4jDatabase(
+    uri=config["storage"]["neo4j"]["uri"],
+    user=config["storage"]["neo4j"]["user"],
+    password=config["storage"]["neo4j"]["password"]
+)
 
 def get_context(query: str, k=3) -> str:
+    """获取相关上下文，返回简洁的prompt给AI，同时记录详细日志
+    
+    Args:
+        query: 用户输入的查询
+        k: 返回的相关记忆数量
+    """
+    logger.info(f"\n============ 开始构建上下文 ============")
+    logger.info(f"查询: {query}")
     print(f"\n{Fore.CYAN}为查询生成上下文: {Fore.YELLOW}{query}{Style.RESET_ALL}")
     
-    # 获取查询的embedding
-    print(f"\n{Fore.CYAN}1. 生成查询的embedding向量...{Style.RESET_ALL}")
+    # 获取查询的embedding和主题
+    print(f"\n{Fore.CYAN}1. 生成查询向量...{Style.RESET_ALL}")
     query_embedding = get_embedding(query)
-    
-    # 提取查询主题
     topic = extract_topic(query)
+    
+    logger.info(f"提取的主题关键词: {topic}")
     print(f"\n{Fore.CYAN}提取的主题关键词: {Fore.YELLOW}{topic}{Style.RESET_ALL}")
     
-    # 1. 从FAISS检索语义相似的记忆
-    print(f"\n{Fore.CYAN}2. 从向量存储中检索语义相似记忆...{Style.RESET_ALL}")
-    similar_memories = memory_store.search(query_embedding, k)
+    # 1. 从FAISS获取向量相似度高的记忆
+    print(f"\n{Fore.CYAN}2. 从FAISS获取向量相似度高的记忆...{Style.RESET_ALL}")
+    vector_memories = memory_store.search(query_embedding, k=k*2)  # 获取更多候选
     
     # 2. 从Neo4j获取主题相关的记忆时间戳
-    print(f"\n{Fore.CYAN}3. 从Neo4j获取主题相关记忆...{Style.RESET_ALL}")
-    topic_related_timestamps = []
-    if topic:  # 只有当提取出主题时才进行主题相关检索
-        topic_related_timestamps = neo4j_db.get_related_memories_by_topic(topic, limit=3)
+    print(f"\n{Fore.CYAN}3. 从Neo4j获取主题相关的记忆...{Style.RESET_ALL}")
+    topic_timestamps = neo4j_db.get_related_memories_by_topic(topic, limit=k*2)
+    topic_memories = []
     
-    # 3. 从FAISS获取这些时间戳对应的完整记忆
-    topic_related_memories = []
-    for timestamp in topic_related_timestamps:
-        memory = memory_store.get_memory_by_timestamp(timestamp)
-        if memory and memory not in similar_memories:  # 避免重复
-            topic_related_memories.append(memory)
+    # 获取主题相关记忆的完整内容
+    for ts in topic_timestamps:
+        memory = memory_store.get_memory_by_timestamp(ts)
+        if memory:
+            # 计算与查询的相似度
+            memory_text = f"{memory.user_message}\n{memory.ai_response}"
+            memory_embedding = get_embedding(memory_text)
+            similarity = np.dot(query_embedding, memory_embedding) / (
+                np.linalg.norm(query_embedding) * np.linalg.norm(memory_embedding)
+            )
+            memory.similarity = float(similarity)
+            topic_memories.append(memory)
     
-    # 4. 从Neo4j获取图关系连接的记忆
-    graph_related_memories = []
-    if similar_memories:
-        for memory in similar_memories[:2]:  # 只对前两条最相似的记忆进行图关系扩展
-            related_timestamps = neo4j_db.get_related_memories(memory.timestamp, max_depth=1, min_similarity=0.8)
-            for rel_timestamp in related_timestamps:
-                rel_memory = memory_store.get_memory_by_timestamp(rel_timestamp)
-                if rel_memory and rel_memory not in similar_memories and rel_memory not in graph_related_memories:
-                    graph_related_memories.append(rel_memory)
+    # 3. 从Neo4j获取图关系相关的记忆
+    print(f"\n{Fore.CYAN}4. 从Neo4j获取图关系相关的记忆...{Style.RESET_ALL}")
+    # 如果有向量相似的记忆，使用其中最相似的作为起点
+    graph_memories = []
+    if vector_memories:
+        start_timestamp = vector_memories[0].timestamp
+        graph_memories = neo4j_db.get_related_memories(
+            start_timestamp, 
+            max_depth=config["retrieval"]["graph_related_depth"],
+            min_similarity=config["retrieval"]["min_similarity"]
+        )
     
-    # 打印检索结果统计
-    print(f"\n{Fore.GREEN}检索结果统计:{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}语义相似记忆: {Fore.WHITE}{len(similar_memories)} 条{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}主题相关记忆: {Fore.WHITE}{len(topic_related_memories)} 条{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}图关系记忆: {Fore.WHITE}{len(graph_related_memories)} 条{Style.RESET_ALL}")
+    # 4. 合并所有记忆并去重
+    print(f"\n{Fore.CYAN}5. 合并记忆并去重...{Style.RESET_ALL}")
+    all_memories = vector_memories + topic_memories + graph_memories
     
-    # 组合上下文，避免重复
-    context = "以下是相关的历史对话记录：\n\n"
+    # 使用字典去重，保留相似度最高的版本
+    unique_memories = {}
+    for memory in all_memories:
+        if memory.timestamp not in unique_memories or memory.similarity > unique_memories[memory.timestamp].similarity:
+            unique_memories[memory.timestamp] = memory
     
-    # 添加语义相似记忆
-    if similar_memories:
-        context += "【语义相似的对话】\n"
-        for i, memory in enumerate(similar_memories, 1):
-            context += f"{i}. {str(memory)}\n\n"
+    # 转换回列表并按相似度排序
+    merged_memories = list(unique_memories.values())
+    merged_memories.sort(key=lambda x: x.similarity, reverse=True)
     
-    # 添加主题相关记忆
-    if topic_related_memories:
-        context += "【主题相关的对话】\n"
-        for i, memory in enumerate(topic_related_memories, 1):
-            context += f"{i}. {str(memory)}\n\n"
+    # 5. 进一步筛选，移除内容高度相似的记忆
+    print(f"\n{Fore.CYAN}6. 筛选内容高度相似的记忆...{Style.RESET_ALL}")
+    filtered_memories = []
+    seen_contents = set()
     
-    # 添加图关系连接的记忆
-    if graph_related_memories:
-        context += "【关联对话】\n"
-        for i, memory in enumerate(graph_related_memories, 1):
-            context += f"{i}. {str(memory)}\n\n"
+    for memory in merged_memories:
+        # 创建内容指纹 (简化版本，实际可以使用更复杂的算法)
+        content_key = f"{memory.user_message[:100]}"
+        
+        # 检查是否有高度相似的内容已经被选中
+        is_duplicate = False
+        for existing_key in seen_contents:
+            # 使用简单的字符串相似度检查
+            if similarity_score(content_key, existing_key) > config["retrieval"]["filter_similarity_threshold"]:
+                is_duplicate = True
+                break
+        
+        if not is_duplicate:
+            filtered_memories.append(memory)
+            seen_contents.add(content_key)
+            
+            # 如果已经有足够的记忆，停止添加
+            if len(filtered_memories) >= k:
+                break
     
-    return context
+    # 记录详细日志
+    logger.info(f"找到相关记忆: 向量相似 {len(vector_memories)}条, 主题相关 {len(topic_memories)}条, 图关系 {len(graph_memories)}条")
+    logger.info(f"合并后: {len(merged_memories)}条, 过滤后: {len(filtered_memories)}条")
+    
+    for i, memory in enumerate(filtered_memories, 1):
+        logger.info(f"\n记忆 {i}:")
+        logger.info(f"相似度: {memory.similarity:.4f}")
+        logger.info(f"时间戳: {memory.timestamp}")
+        logger.info(f"用户: {memory.user_message}")
+        logger.info(f"助手: {memory.ai_response}")
+    
+    # 打印简要统计
+    print(f"\n{Fore.GREEN}检索结果: {len(filtered_memories)} 条记忆 (从 {len(merged_memories)} 条候选中筛选){Style.RESET_ALL}")
+    
+    # 构建简洁的prompt
+    prompt = ""
+    if filtered_memories:
+        for memory in filtered_memories:
+            prompt += f"用户: {memory.user_message}\n"
+            prompt += f"助手: {memory.ai_response}\n\n"
+    
+    logger.info("\n============ 上下文构建完成 ============\n")
+    return prompt
+
+# 辅助函数：计算两个字符串的相似度
+def similarity_score(str1, str2):
+    """计算两个字符串的简单相似度 (0-1)"""
+    # 使用集合计算Jaccard相似度
+    set1 = set(str1)
+    set2 = set(str2)
+    
+    if not set1 or not set2:
+        return 0.0
+        
+    intersection = len(set1.intersection(set2))
+    union = len(set1.union(set2))
+    
+    return intersection / union
 
 def save_conversation(user_message: str, ai_response: str):
     """保存对话并记录日志"""
@@ -709,9 +955,12 @@ def save_conversation(user_message: str, ai_response: str):
             print(f"{Fore.RED}检测到重复问题，跳过保存（相似度: {highest_similarity:.4f}）{Style.RESET_ALL}")
             return
     
+    # 生成时间戳
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+    
     # 保存到Neo4j并建立关系
     print(f"\n{Fore.CYAN}1. 保存到Neo4j并建立记忆关系...{Style.RESET_ALL}")
-    timestamp = neo4j_db.create_memory_with_relations(user_message, ai_response, similar_memories)
+    neo4j_timestamp = neo4j_db.create_memory_with_relations(user_message, ai_response, similar_memories)
     
     # 保存到FAISS
     print(f"\n{Fore.CYAN}2. 保存到FAISS向量存储...{Style.RESET_ALL}")
@@ -756,109 +1005,52 @@ def calculate_tokens_and_cost(input_text: str, output_text: str) -> tuple:
 # 添加数据迁移函数，用于更新现有的Neo4j节点
 
 def update_existing_nodes_with_topic():
-    """为现有的 Neo4j 节点添加 topic 属性和预览字段"""
-    print(f"\n{Fore.CYAN}开始更新Neo4j节点结构...{Style.RESET_ALL}")
-    with neo4j_db.driver.session() as session:
-        # 获取所有没有 topic 属性的节点
-        result = session.run("""
-            MATCH (m:Memory)
-            WHERE m.topic IS NULL
-            RETURN m.timestamp as timestamp, m.user_message as user_message
-        """)
-        
-        nodes_to_update = [(record["timestamp"], record["user_message"]) for record in result]
-        
-        print(f"{Fore.YELLOW}找到 {len(nodes_to_update)} 个需要更新的节点{Style.RESET_ALL}")
-        
-        # 为每个节点添加 topic 属性和预览字段
-        updated_count = 0
-        for timestamp, user_message in nodes_to_update:
-            if user_message:
-                # 提取主题
-                topic = extract_topic(user_message)
-                
-                # 创建预览
-                user_message_preview = user_message[:100] + "..." if len(user_message) > 100 else user_message
-                
-                # 获取AI回答
-                memory = memory_store.get_memory_by_timestamp(timestamp)
-                ai_response_preview = ""
-                if memory:
-                    ai_response_preview = memory.ai_response[:100] + "..." if len(memory.ai_response) > 100 else memory.ai_response
-                
-                # 更新节点
-                session.run("""
-                    MATCH (m:Memory {timestamp: $timestamp})
-                    SET m.topic = $topic,
-                        m.user_message_preview = $user_message_preview,
-                        m.ai_response_preview = $ai_response_preview
-                """, timestamp=timestamp, 
-                     topic=topic,
-                     user_message_preview=user_message_preview,
-                     ai_response_preview=ai_response_preview)
-                
-                updated_count += 1
-                if updated_count % 10 == 0:
-                    print(f"{Fore.GREEN}已更新 {updated_count}/{len(nodes_to_update)} 个节点{Style.RESET_ALL}")
-        
-        # 检查是否有节点仍然存储完整对话内容
-        result = session.run("""
-            MATCH (m:Memory)
-            WHERE m.user_message IS NOT NULL OR m.ai_response IS NOT NULL
-            RETURN count(m) as count
-        """).single()
-        
-        if result and result["count"] > 0:
-            node_count = result["count"]
-            print(f"{Fore.YELLOW}发现 {node_count} 个节点仍存储完整对话内容，开始清理...{Style.RESET_ALL}")
-            
-            # 移除完整对话内容，只保留预览和元数据
-            session.run("""
+    """更新现有节点，添加主题属性"""
+    try:
+        with neo4j_db.driver.session() as session:
+            # 检查是否有节点缺少topic属性
+            result = session.run("""
                 MATCH (m:Memory)
-                WHERE m.user_message IS NOT NULL OR m.ai_response IS NOT NULL
-                REMOVE m.user_message, m.ai_response
-            """)
+                WHERE m.topic IS NULL AND m.user_message_preview IS NOT NULL
+                RETURN count(m) as count
+            """).single()
             
-            print(f"{Fore.GREEN}已清理完整对话内容，释放Neo4j存储空间{Style.RESET_ALL}")
-        
-        print(f"{Fore.GREEN}Neo4j节点结构更新完成，共更新 {updated_count} 个节点{Style.RESET_ALL}")
-
-def load_config():
-    """加载配置文件"""
-    config_path = 'config.json'
-    if os.path.exists(config_path):
-        with open(config_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    else:
-        # 默认配置
-        default_config = {
-            "storage": {
-                "neo4j": {
-                    "store_full_content": False,
-                    "store_metadata": True,
-                    "similarity_threshold": 0.7
-                },
-                "faiss": {
-                    "store_full_content": True,
-                    "dimension": 1024
-                }
-            },
-            "retrieval": {
-                "semantic_search_count": 3,
-                "topic_related_count": 3,
-                "graph_related_depth": 1,
-                "min_similarity": 0.7
-            }
-        }
-        # 保存默认配置
-        with open(config_path, 'w', encoding='utf-8') as f:
-            json.dump(default_config, f, indent=4)
-        return default_config
-
-# 加载配置
-config = load_config()
-
-# 添加清除存储功能
+            missing_topic_count = result["count"] if result else 0
+            
+            if missing_topic_count > 0:
+                print(f"{Fore.YELLOW}发现 {missing_topic_count} 个节点缺少主题属性，正在更新...{Style.RESET_ALL}")
+                
+                # 获取所有缺少topic的节点
+                result = session.run("""
+                    MATCH (m:Memory)
+                    WHERE m.topic IS NULL AND m.user_message_preview IS NOT NULL
+                    RETURN m.timestamp as timestamp, m.user_message_preview as user_msg
+                    LIMIT 1000
+                """)
+                
+                updated_count = 0
+                for record in result:
+                    timestamp = record["timestamp"]
+                    user_msg = record["user_msg"]
+                    
+                    # 提取主题
+                    topic = extract_topic(user_msg)
+                    
+                    # 更新节点
+                    session.run("""
+                        MATCH (m:Memory {timestamp: $timestamp})
+                        SET m.topic = $topic
+                    """, timestamp=timestamp, topic=topic)
+                    
+                    updated_count += 1
+                
+                print(f"{Fore.GREEN}已更新 {updated_count} 个节点的主题属性{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.GREEN}所有节点都已有主题属性{Style.RESET_ALL}")
+                
+    except Exception as e:
+        print(f"{Fore.RED}更新节点主题属性时发生错误: {str(e)}{Style.RESET_ALL}")
+        logger.error(f"更新节点主题属性时发生错误: {str(e)}")
 
 def clear_all_memories():
     """清除所有存储的记忆（Neo4j和FAISS）"""
@@ -1655,13 +1847,17 @@ def initialize_system():
     directories = ['logs', 'backups', 'data']
     for directory in directories:
         if not os.path.exists(directory):
-            os.makedirs(directory)
-            print(f"{Fore.GREEN}创建目录: {directory}{Style.RESET_ALL}")
+            try:
+                os.makedirs(directory)
+                print(f"{Fore.GREEN}创建目录: {directory}{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.RED}创建目录 {directory} 失败: {str(e)}{Style.RESET_ALL}")
     
-    # 2. 检查FAISS索引文件
+    # 2. 检查FAISS索引文件目录权限
     faiss_index_path = "faiss_index.pkl"
-    if not os.path.exists(faiss_index_path):
-        print(f"{Fore.YELLOW}FAISS索引文件不存在，将在首次使用时创建{Style.RESET_ALL}")
+    faiss_dir = os.path.dirname(faiss_index_path) or "."
+    if not os.access(faiss_dir, os.W_OK):
+        print(f"{Fore.RED}警告: 没有写入权限到 {faiss_dir} 目录，FAISS索引可能无法保存{Style.RESET_ALL}")
     
     # 3. 检查必要的Python库
     try:
@@ -1819,7 +2015,7 @@ try:
         
         # 构建带有上下文的提示
         print(f"\n{Fore.CYAN}构建带有上下文的提示...{Style.RESET_ALL}")
-        system_message = "你是一个有记忆能力的AI助手。" + context
+        system_message = "你是一个有记忆能力的AI助手，下面你与用户的对话记录，读取然后根据对话内容，再最后回复用户User问题：\n" + context
         messages = [
             {"role": "system", "content": system_message},
             {"role": "user", "content": message},
@@ -1834,10 +2030,14 @@ try:
         print(f"\n{Fore.CYAN}生成回答中...{Style.RESET_ALL}")
         start_time = time.time()
         response = client.chat.completions.create(
-            model="Pro/deepseek-ai/DeepSeek-V3",
+            model=config["model"]["name"],
             messages=messages,
             stream=True,
-            max_tokens=4096
+            max_tokens=config["model"]["max_tokens"],
+            temperature=config["model"]["temperature"],
+            top_p=config["model"]["top_p"],
+            frequency_penalty=config["model"].get("frequency_penalty", 0),
+            presence_penalty=config["model"].get("presence_penalty", 0)
         )
 
         # 收集完整的响应
@@ -1889,3 +2089,4 @@ finally:
     print(f"{Fore.CYAN}Neo4j连接已关闭{Style.RESET_ALL}")
     print(f"{Fore.MAGENTA}感谢使用持久记忆AI助手，再见！{Style.RESET_ALL}")
     print(f"{Fore.YELLOW}程序结束{Style.RESET_ALL}")
+

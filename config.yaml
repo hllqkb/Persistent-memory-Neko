@@ -1,0 +1,130 @@
+# API配置
+api:
+  # API密钥
+  key: sk-jivwbgqsesocbzkggntyzjwlkvlyhuiaphesburlvyswzsfc
+  # API基础URL
+  base_url: https://api.siliconflow.cn/v1
+  # 请求超时时间（秒）
+  timeout: 30
+
+# AI模型配置
+model:
+  # 使用的AI模型
+  name: Pro/deepseek-ai/DeepSeek-V3
+  # 温度参数，控制输出的随机性(0-1)
+  temperature: 0.7
+  # 单次生成的最大token数
+  max_tokens: 4096
+  # 核采样参数
+  top_p: 0.9
+  # 频率惩罚
+  frequency_penalty: 0.0
+  # 存在惩罚
+  presence_penalty: 0.0
+
+# 记忆系统配置
+memory:
+  # 记忆相似度阈值
+  similarity_threshold: 0.7
+  # 记忆图最大深度
+  max_depth: 10
+  # 对话轮次上限
+  max_conversation_turns: 10
+  
+  # 短期记忆配置
+  short_term:
+    # 短期记忆保留的对话轮数
+    max_rounds: 3
+    # 是否包含在上下文中
+    include_in_context: true
+
+# 存储配置
+storage:
+  # Neo4j图数据库配置
+  neo4j:
+    uri: bolt://localhost:7687
+    user: neo4j
+    password: 12345678
+    # 是否存储完整内容
+    store_full_content: false
+    # 是否存储元数据
+    store_metadata: true
+    # 建立关系的相似度阈值
+    similarity_threshold: 0.7
+  
+  # FAISS向量存储配置
+  faiss:
+    # 存储完整对话内容
+    store_full_content: true
+    # 向量维度
+    dimension: 1024
+    # 索引类型
+    index_type: flat
+    # 最大向量数量
+    max_size: 1000000
+
+# 检索配置
+retrieval:
+  # 语义搜索返回数量
+  semantic_search_count: 3
+  # 主题相关返回数量
+  topic_related_count: 3
+  # 图关系搜索深度
+  graph_related_depth: 10
+  # 最小相似度要求
+  min_similarity: 0.75
+  # 相似内容过滤阈值
+  filter_similarity_threshold: 0.9
+
+# Embedding配置
+embedding:
+  # embedding模型
+  model: BAAI/bge-m3
+  # 请求超时时间
+  timeout: 30
+  # 重试次数
+  retry_count: 3
+  # 批处理大小
+  batch_size: 32
+  # 是否启用缓存
+  cache_enabled: true
+
+# 性能优化配置
+performance:
+  # 启用缓存
+  use_cache: true
+  # 缓存大小
+  cache_size_mb: 100
+  # 使用异步处理
+  use_async: true
+  # 批处理大小
+  batch_size: 5
+  # 最大工作线程数
+  max_workers: 4
+  # 内存阈值
+  memory_threshold_mb: 1000
+  # 最大缓存文件数
+  max_cache_files: 1000
+  # 检查间隔(秒)
+  check_interval: 10
+
+# 日志配置
+logging:
+  # 日志级别
+  level: INFO
+  # 日志文件路径
+  file_path: logs/neko.log
+  # 单个日志文件大小上限
+  max_size_mb: 10
+  # 保留的日志文件数量
+  backup_count: 5
+  # 日志格式
+  format: "%(asctime)s - %(levelname)s - %(message)s"
+
+# 常用查询模板
+common_queries:
+  - 你好
+  - 你是谁
+  - 你能做什么
+  - 帮我写代码
+  - 讲个故事 
