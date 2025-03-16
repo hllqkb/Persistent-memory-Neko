@@ -677,6 +677,8 @@ class FAISSMemoryStore:
         """清除所有记忆数据"""
         self.index = faiss.IndexFlatL2(self.dimension)
         self.texts = []
+        if os.path.exists('faiss_index.pkl'):
+            os.remove('faiss_index.pkl')
         if os.path.exists('faiss_index.bin'):
             os.remove('faiss_index.bin')
         if os.path.exists('faiss_texts.pkl'):
