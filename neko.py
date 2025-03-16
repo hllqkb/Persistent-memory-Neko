@@ -804,13 +804,16 @@ neo4j_db = Neo4jDatabase(
     password=config["storage"]["neo4j"]["password"]
 )
 
+# 从base.md文件获取basemd变量的内容
+try:
+    with open('base.md', 'r', encoding='utf-8') as file:
+        basemd = file.read()
+except FileNotFoundError:
+    logger.error("base.md文件不存在")
+    basemd = "base.md文件不存在，无法获取内容。"
+
 def get_context(query: str, k=3) -> str:
-    """获取相关上下文，返回简洁的prompt给AI，同时记录详细日志
-    
-    Args:
-        query: 用户输入的查询
-        k: 返回的相关记忆数量
-    """
+    """获取相关上下文，返回简洁的prompt给AI，同时记录详细日志"""
     logger.info(f"\n============ 开始构建上下文 ============")
     logger.info(f"查询: {query}")
     print(f"\n{Fore.CYAN}为查询生成上下文: {Fore.YELLOW}{query}{Style.RESET_ALL}")
@@ -1885,6 +1888,7 @@ try:
     print(f"\n{Fore.GREEN}{'=' * 50}{Style.RESET_ALL}")
     print(f"{Fore.YELLOW}{'=' * 15}{Fore.WHITE} AI助手启动 {Fore.YELLOW}{'=' * 15}{Style.RESET_ALL}")
     print(f"{Fore.GREEN}{'=' * 50}{Style.RESET_ALL}")
+    print(f"\n{Fore.CYAN}当前使用的模型: {config['model']['name']}{Style.RESET_ALL}\n")
     
     # 初始化系统
     initialize_system()
@@ -2017,7 +2021,23 @@ try:
         
         # 构建带有上下文的提示
         print(f"\n{Fore.CYAN}构建带有上下文的提示...{Style.RESET_ALL}")
-        system_message = "你是一个有记忆能力的AI助手，下面你与用户的对话记录，读取然后根据对话内容，再最后回复用户User问题：\n" + context
+        current_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with open('prompt.md', 'r', encoding='utf-8') as file:
+                prompt_content = file.read()
+                print(f"\n{Fore.CYAN}读取prompt.md文件内容...{Style.RESET_ALL}")
+                logger.info("读取prompt.md文件内容:")
+                logger.info(prompt_content)
+        except FileNotFoundError:
+            logger.error("prompt.md文件不存在")
+            prompt_content = "prompt.md文件不存在，无法获取内容。"
+            print(f"\n{Fore.YELLOW}{prompt_content}{Style.RESET_ALL}")
+        system_message = (
+            basemd + "\n" +  # 在 prompt 的最前面添加 basemd 内容
+            "1.你需要严格遵守的人设:"+prompt_content+"\n"
+            +
+            "2.你要扮演人设，根据人设回答问题，下面你与用户的对话记录，当前时间是" + current_date + "，读取然后根据对话内容和人设，再最后回复用户User问题：\n" + context
+        )
         messages = [
             {"role": "system", "content": system_message},
             {"role": "user", "content": message},
@@ -2065,15 +2085,11 @@ try:
         save_conversation(message, full_response)
                 
         # 打印token统计和费用信息
-        print(f"\n{Fore.YELLOW}{'#' * 50}{Style.RESET_ALL}")
         print(f"{Fore.YELLOW}{'#' * 15}{Fore.WHITE} 对话统计 {Fore.YELLOW}{'#' * 15}{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}{'#' * 50}{Style.RESET_ALL}")
         print(f"{Fore.CYAN}输入tokens: {Fore.WHITE}{input_tokens:,} {Fore.YELLOW}(约￥{input_tokens * 0.000004:.4f}){Style.RESET_ALL}")
         print(f"{Fore.CYAN}输出tokens: {Fore.WHITE}{output_tokens:,} {Fore.YELLOW}(约￥{output_tokens * 0.000016:.4f}){Style.RESET_ALL}")
         print(f"{Fore.CYAN}本次费用: {Fore.GREEN}￥{cost:.4f}{Style.RESET_ALL}")
         print(f"{Fore.CYAN}累计总费用: {Fore.GREEN}￥{total_cost:.4f}{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}{'#' * 50}{Style.RESET_ALL}")
-        
         # 记录token统计和费用信息
         logger.info(f"输入tokens: {input_tokens:,}")
         logger.info(f"输出tokens: {output_tokens:,}")
