@@ -20,7 +20,7 @@ var/
 .installed.cfg
 *.egg
 
-# 虚拟环境
+# 虚拟环
 venv/
 ENV/
 env/
